@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = "0.4.43"
+crossterm = { version = "0.28.0", features = ["serde", "event-stream"] }
+futures = "0.3.31"
+ratatui = "0.30.0"
+reqwest = "0.13.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_derive = "1.0.228"
+signal-hook = "0.4.3"
+tokio = { version = "1.49.0", features = ["time", "macros", "rt"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
