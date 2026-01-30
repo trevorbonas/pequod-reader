@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 chrono = "0.4.43"
+color-eyre = "0.6.5"
 crossterm = { version = "0.28.0", features = ["serde", "event-stream"] }
 futures = "0.3.31"
 ratatui = "0.30.0"
