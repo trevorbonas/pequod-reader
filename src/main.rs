@@ -1,16 +1,16 @@
-use std::cmp::PartialEq;
-
 use anyhow::{Result, anyhow};
-
 use chrono::{DateTime, Utc};
-
-use crossterm::event::{self, Event, KeyCode};
+use color_eyre::owo_colors::OwoColorize;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::execute;
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
+use html2text::from_read;
 use ratatui::Terminal;
-use ratatui::layout::{Constraint, Direction, Layout, Margin};
-use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Borders, List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::layout::{Constraint, Direction, Flex, Layout, Margin, Position};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{
+    Borders, Clear, List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -18,37 +18,110 @@ use ratatui::{
     text::Line,
     widgets::{Block, Paragraph},
 };
+use std::char;
+use std::cmp::PartialEq;
+use tokio::sync::mpsc;
 
 mod tui;
 
-struct Feed {
-    name: String,
-    articles: Vec<Article>,
+struct RssFeed {
+    id: String,
+    title: String,
+    link: String,
+    rss_entries: Vec<RssEntry>,
     expanded: bool,
 }
 
+impl From<feed_rs::model::Feed> for RssFeed {
+    fn from(feed: feed_rs::model::Feed) -> Self {
+        let rss_entries = feed.entries.into_iter().map(RssEntry::from).collect();
+        RssFeed {
+            id: feed.id,
+            title: feed
+                .title
+                .map(|t| t.content)
+                .unwrap_or_else(|| "Untitled".into()),
+            link: feed
+                .links
+                .first()
+                .map(|l| l.href.clone())
+                .unwrap_or_default(),
+            rss_entries,
+            expanded: false,
+        }
+    }
+}
+
 #[derive(Clone)]
-struct Article {
+struct RssEntry {
+    id: String,
     title: String,
     authors: Vec<String>,
     content: String,
+    link: String,
+    published: Option<DateTime<Utc>>,
     read: bool,
-    date: DateTime<Utc>,
+}
+
+impl From<feed_rs::model::Entry> for RssEntry {
+    fn from(entry: feed_rs::model::Entry) -> Self {
+        let authors = entry.authors.into_iter().map(|a| a.name).collect();
+        let content = entry
+            .content
+            .and_then(|c| c.body)
+            .or_else(|| {
+                entry
+                    .summary
+                    .map(|s| format!("{}\n\nFull content available online.", s.content))
+            })
+            .unwrap_or_default();
+
+        RssEntry {
+            id: entry.id,
+            title: entry
+                .title
+                .map(|t| t.content)
+                .unwrap_or_else(|| "Untitled".into()),
+            authors,
+            content,
+            link: entry
+                .links
+                .first()
+                .map(|l| l.href.clone())
+                .unwrap_or_default(),
+            published: entry.published,
+            read: false,
+        }
+    }
 }
 
 enum Row {
-    Feed(usize),           // Feed index.
-    Article(usize, usize), // Feed index and article index.
+    RssFeed(usize),         // Feed index.
+    RssEntry(usize, usize), // Feed index and entry index.
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 enum ViewState {
     #[default]
-    Feeds,
-    Article {
-        feed_index: usize,
-        article_index: usize,
+    // A list of feeds with nested entries.
+    RssFeeds,
+    // An entry title with a date and author(s).
+    RssEntry {
+        rss_feed_index: usize,
+        rss_entry_index: usize,
     },
+}
+
+enum PopupState {
+    None,
+    // Popup for adding a new feed. Takes user input.
+    AddRssFeed,
+    ConfirmDeleteRssFeed,
+    // Popup that displays errors.
+    Error,
+    // Help popup displaying keybinds and helpful information.
+    RssEntryHelp,
+    RssFeedHelp,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -58,42 +131,156 @@ enum RunningState {
     Done,
 }
 
+enum AppEvent {
+    FeedFetched(Result<feed_rs::model::Feed, String>),
+}
+
 struct App {
+    // For asynchronous events, like synchronizing feeds
+    // or adding a new feed.
+    sender: mpsc::UnboundedSender<AppEvent>,
+    error_message: Option<String>,
+    // Position of the cursor in the input field.
+    character_index: usize,
+    // Which screen to display.
     view_state: ViewState,
+    // Which popup to display.
+    popup: PopupState,
+    // User input. For example, when adding a new feed.
+    input: String,
+    // The position of the cursor in the feeds list.
     cursor: usize,
-    feeds: Vec<Feed>,
+    // Feeds, which contain entries.
+    rss_feeds: Vec<RssFeed>,
+    // Current running state.
     running_state: RunningState,
     scrollbar_state: ScrollbarState,
-    article_scroll: u16,
-    last_article_area: Rect,
+    // The current visual line for the current article.
+    rss_entry_scroll: u16,
+    // Previous entry area. Used for visual navigation.
+    last_rss_entry_area: Rect,
 }
 
 impl App {
-    pub fn new() -> App {
+    pub fn new(sender: mpsc::UnboundedSender<AppEvent>) -> App {
         App {
-            view_state: ViewState::Feeds,
+            sender: sender,
+            error_message: None,
+            character_index: 0,
+            view_state: ViewState::RssFeeds,
+            popup: PopupState::None,
+            input: String::new(),
             cursor: 0,
-            feeds: vec![],
+            rss_feeds: vec![],
             running_state: RunningState::Running,
             scrollbar_state: ScrollbarState::new(0),
-            article_scroll: 0,
-            last_article_area: Rect::default(),
+            rss_entry_scroll: 0,
+            last_rss_entry_area: Rect::default(),
         }
     }
 
-    pub fn article_max_scroll(
+    pub fn get_max_rss_entry_scroll(
         &self,
-        feed_index: usize,
-        article_index: usize,
+        rss_feed_index: usize,
+        rss_entry_index: usize,
         area_height: u16,
         area_width: u16,
     ) -> u16 {
-        let content = &self.feeds[feed_index].articles[article_index].content;
+        let content = &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content;
         let wrapped_lines = wrap_text_lines(content.as_str(), area_width as usize);
         let total_lines = wrapped_lines.len() as i32;
         let visible_lines = area_height as i32;
         let max_scroll = total_lines - visible_lines;
         if max_scroll < 0 { 0 } else { max_scroll as u16 }
+    }
+
+    pub fn add_rss_feed(&mut self) {
+        let rss_feed_url: String = self.input.clone();
+        self.input.clear();
+        self.reset_cursor();
+        let sender = self.sender.clone();
+
+        // Use a background thread to retrieve the new feed.
+        tokio::spawn(async move {
+            let result = async {
+                let rss_body = reqwest::get(&rss_feed_url)
+                    .await
+                    .map_err(|e| format!("Failed to add feed: {}", e.to_string()))?
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to add feed: {}", e.to_string()))?;
+
+                let feed = feed_rs::parser::parse(rss_body.as_bytes())
+                    .map_err(|e| format!("Failed to add feed: {}", e.to_string()))?;
+                Ok(feed)
+            }
+            .await;
+            let _ = sender.send(AppEvent::FeedFetched(result));
+        });
+    }
+
+    fn delete_rss_feed(&mut self, rss_feed_index: usize) {
+        self.rss_feeds.remove(rss_feed_index);
+    }
+
+    // Cursor methods are from the ratatui user input sample:
+    // https://ratatui.rs/examples/apps/user_input/.
+
+    fn move_cursor_left(&mut self) {
+        let cursor_moved_left = self.character_index.saturating_sub(1);
+        self.character_index = self.clamp_cursor(cursor_moved_left);
+    }
+
+    fn move_cursor_right(&mut self) {
+        let cursor_moved_right = self.character_index.saturating_add(1);
+        self.character_index = self.clamp_cursor(cursor_moved_right);
+    }
+
+    fn enter_char(&mut self, new_char: char) {
+        let index = self.byte_index();
+        self.input.insert(index, new_char);
+        self.move_cursor_right();
+    }
+
+    /// Returns the byte index based on the character position.
+    ///
+    /// Since each character in a string can be contain multiple bytes, it's necessary to calculate
+    /// the byte index based on the index of the character.
+    fn byte_index(&self) -> usize {
+        self.input
+            .char_indices()
+            .map(|(i, _)| i)
+            .nth(self.character_index)
+            .unwrap_or(self.input.len())
+    }
+    fn delete_char(&mut self) {
+        let is_not_cursor_leftmost = self.character_index != 0;
+        if is_not_cursor_leftmost {
+            // Method "remove" is not used on the saved text for deleting the selected char.
+            // Reason: Using remove on String works on bytes instead of the chars.
+            // Using remove would require special care because of char boundaries.
+
+            let current_index = self.character_index;
+            let from_left_to_current_index = current_index - 1;
+
+            // Getting all characters before the selected character.
+            let before_char_to_delete = self.input.chars().take(from_left_to_current_index);
+            // Getting all characters after selected character.
+            let after_char_to_delete = self.input.chars().skip(current_index);
+
+            // Put all characters together except the selected one.
+            // By leaving the selected one out, it is forgotten and therefore deleted.
+            self.input = before_char_to_delete.chain(after_char_to_delete).collect();
+            self.move_cursor_left();
+        }
+    }
+
+    fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
+        new_cursor_pos.clamp(0, self.input.chars().count())
+    }
+
+    fn reset_cursor(&mut self) {
+        self.character_index = 0;
     }
 }
 
@@ -104,116 +291,281 @@ fn wrap_text_lines(text: &str, area_width: usize) -> Vec<String> {
         .collect()
 }
 
-fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run_app<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    receiver: &mut mpsc::UnboundedReceiver<AppEvent>,
+) -> Result<()> {
     loop {
         terminal
             .draw(|f| ui(app, f))
             .map_err(|e| anyhow!("Failed to draw: {}", e))?;
-
         let rows = get_rows(app);
+
+        if let Ok(app_event) = receiver.try_recv() {
+            handle_app_event(app, app_event);
+        }
+
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                match app.view_state {
-                    ViewState::Feeds => match key.code {
-                        KeyCode::Char('H') => {
-                            // TODO: Update to visible top.
-                            app.cursor = 0;
-                        }
-                        KeyCode::Char('M') => {
-                            // TODO: Update to visible middle.
-                            app.cursor = rows.len() / 2 as usize;
-                        }
-                        KeyCode::Char('L') => {
-                            // TODO: Update to visible bottom.
-                            app.cursor = rows.len() - 1;
-                        }
-                        KeyCode::Char('G') => {
-                            app.cursor = rows.len() - 1;
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if app.cursor + 1 < rows.len() {
-                                app.cursor += 1;
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if app.cursor > 0 {
-                                app.cursor -= 1;
-                            }
-                        }
-                        KeyCode::Char('c') => match rows[app.cursor] {
-                            Row::Feed(feed_index) => {
-                                app.feeds[feed_index].expanded = false;
-                            }
-                            Row::Article(feed_index, _) => {
-                                app.feeds[feed_index].expanded = false;
-                                app.cursor = feed_index;
-                            }
-                        },
-                        KeyCode::Enter => match rows[app.cursor] {
-                            Row::Feed(feed_index) => {
-                                app.feeds[feed_index].expanded = !app.feeds[feed_index].expanded;
-                                app.cursor = feed_index;
-                            }
-                            Row::Article(feed_index, article_index) => {
-                                app.feeds[feed_index].articles[article_index].read = true;
-                                app.view_state = ViewState::Article {
-                                    feed_index: feed_index,
-                                    article_index: article_index,
-                                };
-                            }
-                        },
-                        _ => {}
-                    },
-                    ViewState::Article {
-                        feed_index,
-                        article_index,
-                    } => match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            app.view_state = ViewState::Feeds;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if app.article_scroll > 0 {
-                                app.article_scroll -= 1;
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            let area = app.last_article_area;
-                            let max_article_scroll = app.article_max_scroll(
-                                feed_index,
-                                article_index,
-                                area.height,
-                                area.width,
-                            );
-                            if app.article_scroll < max_article_scroll {
-                                app.article_scroll += 1;
-                            }
-                        }
-                        KeyCode::End | KeyCode::Char('G') => {
-                            let area = app.last_article_area;
-                            let max_scroll = app.article_max_scroll(
-                                feed_index,
-                                article_index,
-                                area.height,
-                                area.width,
-                            );
-                            app.article_scroll = max_scroll;
-                        }
-                        _ => {}
-                    },
+                if handle_key(app, key, &rows)? {
+                    return Ok(());
                 }
             }
         }
     }
 }
 
+fn handle_app_event(app: &mut App, app_event: AppEvent) {
+    match app_event {
+        AppEvent::FeedFetched(Ok(feed)) => {
+            app.error_message = None;
+            let new_rss_feed = RssFeed::from(feed);
+            app.rss_feeds.push(new_rss_feed);
+        }
+        AppEvent::FeedFetched(Err(err)) => {
+            app.error_message = Some(err);
+        }
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+    match app.popup {
+        PopupState::AddRssFeed => handle_add_rss_feed_popup(app, key),
+        PopupState::ConfirmDeleteRssFeed => handle_delete_rss_feed_popup(app, key, rows),
+        PopupState::Error => handle_error_popup(app, key),
+        PopupState::RssEntryHelp => handle_rss_entry_help_popup(app, key),
+        PopupState::RssFeedHelp => handle_rss_feed_help_popup(app, key),
+        PopupState::None => handle_default(app, key, rows),
+    }
+}
+
+fn handle_add_rss_feed_popup(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.popup = PopupState::None,
+        KeyCode::Enter => {
+            app.add_rss_feed();
+            app.popup = PopupState::None;
+        }
+        KeyCode::Char(c) => app.enter_char(c),
+        KeyCode::Backspace => app.delete_char(),
+        KeyCode::Left => app.move_cursor_left(),
+        KeyCode::Right => app.move_cursor_right(),
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_delete_rss_feed_popup(app: &mut App, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => app.popup = PopupState::None,
+        KeyCode::Char('y') => {
+            let row = &rows[app.cursor];
+            match row {
+                Row::RssFeed(rss_feed_index) | Row::RssEntry(rss_feed_index, _) => {
+                    app.delete_rss_feed(*rss_feed_index);
+                    if *rss_feed_index > 0 {
+                        app.cursor = rss_feed_index - 1;
+                    } else {
+                        app.cursor = 0;
+                    }
+                }
+            }
+            app.popup = PopupState::None;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_error_popup(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+            app.error_message = None;
+            app.popup = PopupState::None;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_rss_feed_help_popup(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.popup = PopupState::None,
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_rss_entry_help_popup(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.popup = PopupState::None,
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_default(app: &mut App, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+    match app.view_state {
+        ViewState::RssFeeds => handle_rss_feeds_view(app, key, rows),
+        ViewState::RssEntry {
+            rss_feed_index,
+            rss_entry_index,
+        } => handle_rss_entry_view(app, key, rss_feed_index, rss_entry_index),
+    }
+}
+
+fn handle_rss_feeds_view(app: &mut App, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+    match key.code {
+        KeyCode::Char('H') => {
+            // TODO: Update to visible top.
+            app.cursor = 0;
+        }
+        KeyCode::Char('M') => {
+            // TODO: Update to visible middle.
+            app.cursor = rows.len() / 2 as usize;
+        }
+        KeyCode::Char('L') => {
+            // TODO: Update to visible bottom.
+            app.cursor = rows.len() - 1;
+        }
+        KeyCode::Char('G') => {
+            app.cursor = rows.len() - 1;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.cursor + 1 < rows.len() {
+                app.cursor += 1;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.cursor > 0 {
+                app.cursor -= 1;
+            }
+        }
+        KeyCode::Char('a') => {
+            app.popup = PopupState::AddRssFeed;
+        }
+        KeyCode::Char('h') => {
+            app.popup = PopupState::RssFeedHelp;
+        }
+        KeyCode::Char('c') => match rows[app.cursor] {
+            Row::RssFeed(rss_feed_index) => {
+                app.rss_feeds[rss_feed_index].expanded = false;
+                app.cursor = rss_feed_index;
+            }
+            Row::RssEntry(rss_feed_index, _) => {
+                app.rss_feeds[rss_feed_index].expanded = false;
+                app.cursor = rss_feed_index;
+            }
+        },
+        KeyCode::Enter => {
+            if rows.len() > 0 {
+                match rows[app.cursor] {
+                    Row::RssFeed(rss_feed_index) => {
+                        app.rss_feeds[rss_feed_index].expanded =
+                            !app.rss_feeds[rss_feed_index].expanded;
+                        app.cursor = rss_feed_index;
+                    }
+                    Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                        app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].read = true;
+                        app.view_state = ViewState::RssEntry {
+                            rss_feed_index,
+                            rss_entry_index,
+                        };
+                    }
+                }
+            }
+        }
+        KeyCode::Char('d') => match rows[app.cursor] {
+            Row::RssFeed(_) => {
+                app.popup = PopupState::ConfirmDeleteRssFeed;
+            }
+            Row::RssEntry(_, _) => {
+                app.popup = PopupState::ConfirmDeleteRssFeed;
+            }
+        },
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_rss_entry_view(
+    app: &mut App,
+    key: KeyEvent,
+    rss_feed_index: usize,
+    rss_entry_index: usize,
+) -> Result<bool> {
+    match key.code {
+        KeyCode::Char('o') => {
+            open::that(
+                app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
+                    .link
+                    .clone(),
+            )?;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.view_state = ViewState::RssFeeds;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.rss_entry_scroll > 0 {
+                app.rss_entry_scroll -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let area = app.last_rss_entry_area;
+            let max_rss_entry_scroll = app.get_max_rss_entry_scroll(
+                rss_feed_index,
+                rss_entry_index,
+                area.height,
+                area.width,
+            );
+            if app.rss_entry_scroll < max_rss_entry_scroll {
+                app.rss_entry_scroll += 1;
+            }
+        }
+        KeyCode::Char('h') => {
+            app.popup = PopupState::RssEntryHelp;
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            let area = app.last_rss_entry_area;
+            let max_scroll = app.get_max_rss_entry_scroll(
+                rss_feed_index,
+                rss_entry_index,
+                area.height,
+                area.width,
+            );
+            app.rss_entry_scroll = max_scroll;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
 fn ui(app: &mut App, frame: &mut Frame) {
     match app.view_state {
-        ViewState::Feeds => draw_list(frame, app),
-        ViewState::Article {
-            feed_index,
-            article_index,
-        } => draw_article(frame, app, feed_index, article_index),
+        ViewState::RssFeeds => draw_list(frame, app),
+        ViewState::RssEntry {
+            rss_feed_index,
+            rss_entry_index,
+        } => draw_rss_entry(frame, app, rss_feed_index, rss_entry_index),
+    }
+
+    if let PopupState::RssEntryHelp = app.popup {
+        draw_rss_entry_help_popup(frame);
+    }
+    if let PopupState::RssFeedHelp = app.popup {
+        draw_rss_feed_help_popup(frame);
+    }
+    if let PopupState::AddRssFeed = app.popup {
+        draw_add_rss_feed_popup(frame, app);
+    }
+    if let PopupState::ConfirmDeleteRssFeed = app.popup {
+        draw_confirm_delete_rss_feed_popup(frame, app);
+    }
+    if let Some(error_message) = app.error_message.clone() {
+        app.popup = PopupState::Error;
+        draw_error_popup(frame, &error_message);
     }
 }
 
@@ -229,22 +581,23 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| match row {
-            Row::Feed(feed_index) => {
-                let feed = &app.feeds[*feed_index];
-                let num_unread_articles = feed.articles.iter().filter(|a| a.read == false).count();
-                let num_unread_articles_formatted = format!(" {}*", num_unread_articles);
-                let postfix = if num_unread_articles == 0 {
+            Row::RssFeed(rss_feed_index) => {
+                let feed = &app.rss_feeds[*rss_feed_index];
+                let num_unread_rss_entries =
+                    feed.rss_entries.iter().filter(|a| a.read == false).count();
+                let num_unread_rss_entries_formatted = format!(" {}*", num_unread_rss_entries);
+                let postfix = if num_unread_rss_entries == 0 {
                     ""
                 } else {
-                    &num_unread_articles_formatted
+                    &num_unread_rss_entries_formatted
                 };
                 let prefix = if feed.expanded { "▼ " } else { "▶ " };
-                ListItem::new(format!("{}{}{}", prefix, feed.name, postfix))
+                ListItem::new(format!("{}{}{}", prefix, feed.title, postfix))
             }
-            Row::Article(feed_index, article_index) => {
-                let article = &app.feeds[*feed_index].articles[*article_index];
-                let article_postfix = if article.read { "" } else { "*" };
-                ListItem::new(format!("    {}{}", article.title, article_postfix))
+            Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                let rss_entry = &app.rss_feeds[*rss_feed_index].rss_entries[*rss_entry_index];
+                let postfix = if rss_entry.read { "" } else { "*" };
+                ListItem::new(format!("    {}{}", rss_entry.title, postfix))
             }
         })
         .collect();
@@ -258,6 +611,8 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
         "<Enter> ".blue().bold().into(),
         "Add".into(),
         "<a> ".blue().bold().into(),
+        "Delete".into(),
+        "<d> ".blue().bold().into(),
         "Sync".into(),
         "<s> ".blue().bold().into(),
         "Quit".into(),
@@ -283,99 +638,197 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
             vertical: 1,
             horizontal: 0,
         }),
-        &mut app.scrollbar_state.clone(),
+        &mut ScrollbarState::default(),
     );
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_article(
+fn draw_rss_entry(
     frame: &mut ratatui::Frame,
     app: &mut App,
-    feed_index: usize,
-    article_index: usize,
+    rss_feed_index: usize,
+    rss_entry_index: usize,
 ) {
     let size = frame.area();
-    app.last_article_area = size;
-    let article = &app.feeds[feed_index].articles[article_index];
+    app.last_rss_entry_area = size;
+    let rss_entry = &app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index];
     let instructions = Line::from(vec![
         " ↓".into(),
         "<j> ".blue().bold().into(),
         "↑".into(),
         "<k> ".blue().bold().into(),
-        "Top".into(),
-        "<gg> ".blue().bold().into(),
-        "Bottom".into(),
-        "<G> ".blue().bold().into(),
+        "Open in browser".into(),
+        "<o> ".blue().bold().into(),
         "Help".into(),
         "<h> ".blue().bold().into(),
         "Back".into(),
         "<q> ".blue().bold().into(),
     ]);
-    let paragraph = Paragraph::new(article.content.clone())
+    let content = from_read(rss_entry.content.clone().as_bytes(), size.width as usize)
+        .expect("Failed to read HTML");
+    let paragraph = Paragraph::new(content)
         .block(
             Block::default()
-                .title(article.title.clone())
+                .title(rss_entry.title.clone())
                 .title_bottom(instructions.centered())
                 .borders(Borders::ALL),
         )
         .wrap(ratatui::widgets::Wrap { trim: true })
-        .scroll((app.article_scroll, 0));
+        .scroll((app.rss_entry_scroll, 0));
     frame.render_widget(paragraph, size);
 }
 
 fn get_rows(app: &App) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
 
-    for (feed_index, feed) in app.feeds.iter().enumerate() {
-        rows.push(Row::Feed(feed_index));
-        if feed.expanded {
-            for (article_index, _) in feed.articles.iter().enumerate() {
-                rows.push(Row::Article(feed_index, article_index));
+    for (rss_feed_index, rss_feed) in app.rss_feeds.iter().enumerate() {
+        rows.push(Row::RssFeed(rss_feed_index));
+        if rss_feed.expanded {
+            for (rss_entry_index, _) in rss_feed.rss_entries.iter().enumerate() {
+                rows.push(Row::RssEntry(rss_feed_index, rss_entry_index));
             }
         }
     }
     rows
 }
 
-fn main() -> Result<()> {
+fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
+    let area = frame.area();
+    let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
+    let paragraph = Paragraph::new(String::default())
+        .style(Style::default())
+        .block(
+            Block::bordered()
+                .title("Entry commands")
+                .title_bottom(instructions.centered()),
+        );
+    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let popup_area = area;
+    let [popup_area] = vertical.areas(popup_area);
+    let [popup_area] = horizontal.areas(popup_area);
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_rss_feed_help_popup(frame: &mut ratatui::Frame) {
+    let area = frame.area();
+    let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
+    let paragraph = Paragraph::new(String::default())
+        .style(Style::default())
+        .block(
+            Block::bordered()
+                .title("Feed commands")
+                .title_bottom(instructions.centered()),
+        );
+    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let popup_area = area;
+    let [popup_area] = vertical.areas(popup_area);
+    let [popup_area] = horizontal.areas(popup_area);
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_add_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
+    let area = frame.area();
+    let instructions = Line::from(vec![
+        " Submit".into(),
+        "<Enter> ".blue().bold().into(),
+        "Back".into(),
+        "<q> ".blue().bold().into(),
+    ]);
+    let input_paragraph = Paragraph::new(app.input.as_str())
+        .style(Style::default().fg(Color::Rgb(255, 161, 0)))
+        .block(
+            Block::bordered()
+                .title("Add feed")
+                .title_bottom(instructions.centered()),
+        );
+    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let popup_area = area;
+    let [popup_area] = vertical.areas(popup_area);
+    let [popup_area] = horizontal.areas(popup_area);
+    let [input_area] = vertical.areas(popup_area);
+
+    #[allow(clippy::cast_possible_truncation)]
+    frame.set_cursor_position(Position::new(
+        input_area.x + app.character_index as u16 + 1,
+        input_area.y + 1,
+    ));
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(input_paragraph, popup_area);
+}
+
+fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
+    let rows = get_rows(app);
+    let row = &rows[app.cursor];
+    let rss_feed_name = match row {
+        Row::RssFeed(rss_feed_index) => app.rss_feeds[*rss_feed_index].title.as_str(),
+        Row::RssEntry(rss_feed_index, _) => app.rss_feeds[*rss_feed_index].title.as_str(),
+    };
+    let area = frame.area();
+    let instructions = Line::from(vec![
+        " Yes".into(),
+        "<y> ".blue().bold().into(),
+        "No".into(),
+        "<n> ".blue().bold().into(),
+        "Cancel".into(),
+        "<q> ".blue().bold().into(),
+    ]);
+    let paragraph = Paragraph::new(format!(
+        "Are you sure that you want to delete feed \"{}\"",
+        rss_feed_name
+    ))
+    .style(Style::default().fg(Color::Rgb(255, 0, 0)))
+    .block(
+        Block::bordered()
+            .fg(Color::Rgb(255, 0, 0))
+            .title("Delete feed")
+            .title_bottom(instructions.centered()),
+    );
+    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let popup_area = area;
+    let [popup_area] = vertical.areas(popup_area);
+    let [popup_area] = horizontal.areas(popup_area);
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
+    let area = frame.area();
+    let instructions = Line::from(vec![" Ok".into(), "<Enter> ".blue().bold().into()]);
+    let paragraph = Paragraph::new(format!("Error: {}", error_message))
+        .style(Style::default().fg(Color::Rgb(255, 0, 0)))
+        .block(
+            Block::bordered()
+                .fg(Color::Rgb(255, 0, 0))
+                .title("Error")
+                .title_bottom(instructions.centered()),
+        );
+    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let popup_area = area;
+    let [popup_area] = vertical.areas(popup_area);
+    let [popup_area] = horizontal.areas(popup_area);
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let (sender, mut receiver) = mpsc::unbounded_channel();
     enable_raw_mode()?;
     let mut terminal = ratatui::init();
-    let mut app = App::new();
-    app.feeds = vec![Feed {
-        name: "BBC".into(),
-        expanded: false,
-        articles: vec![
-            Article {
-                title: "This one".into(),
-                authors: vec!["Someone".into()],
-                content: "Some text for someone to read and other stuff . . .".into(),
-                date: chrono::offset::Utc::now(),
-                read: false,
-            },
-            Article {
-                title: "Another one".into(),
-                authors: vec!["Someone".into()],
-                content: "Some text for someone to read and other stuff . . .".into(),
-                date: chrono::offset::Utc::now(),
-                read: false,
-            },
-            Article {
-                title: "Another one".into(),
-                authors: vec!["Someone".into()],
-                content: "Some text for someone to read and other stuff . . .".into(),
-                date: chrono::offset::Utc::now(),
-                read: false,
-            },
-            Article {
-                title: "Another one".into(),
-                authors: vec!["Someone".into()],
-                content: "Some text for someone to read and other stuff . . .".into(),
-                date: chrono::offset::Utc::now(),
-                read: false,
-            },
-        ],
-    }];
-    let _ = run_app(&mut terminal, &mut app);
+    let mut app = App::new(sender);
+    let _ = run_app(&mut terminal, &mut app, &mut receiver);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
