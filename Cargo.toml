@@ -18,12 +18,14 @@ log = "0.4.29"
 open = "5.3.3"
 ratatui = "0.30.0"
 reqwest = "0.13.1"
+scraper = "0.25.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_derive = "1.0.228"
 signal-hook = "0.4.3"
 textwrap = "0.16.2"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
+unicode-width = "0.2.2"
 
 [profile.release]
 codegen-units = 1

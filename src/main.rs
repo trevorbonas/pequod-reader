@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
-use color_eyre::owo_colors::OwoColorize;
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::execute;
 use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
@@ -8,8 +7,9 @@ use html2text::from_read;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Margin, Position};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Span, Text};
 use ratatui::widgets::{
-    Borders, Clear, List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Borders, Clear, List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::{
     Frame,
@@ -19,8 +19,10 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 use std::char;
-use std::cmp::PartialEq;
+use std::cmp::{PartialEq, Reverse};
+use textwrap::{Options, wrap};
 use tokio::sync::mpsc;
+use unicode_width::{self, UnicodeWidthChar, UnicodeWidthStr};
 
 mod tui;
 
@@ -35,7 +37,7 @@ struct RssFeed {
 impl From<feed_rs::model::Feed> for RssFeed {
     fn from(feed: feed_rs::model::Feed) -> Self {
         let rss_entries = feed.entries.into_iter().map(RssEntry::from).collect();
-        RssFeed {
+        let mut new_rss_feed = RssFeed {
             id: feed.id,
             title: feed
                 .title
@@ -48,7 +50,11 @@ impl From<feed_rs::model::Feed> for RssFeed {
                 .unwrap_or_default(),
             rss_entries,
             expanded: false,
-        }
+        };
+        new_rss_feed
+            .rss_entries
+            .sort_by_key(|e| Reverse(e.published));
+        new_rss_feed
     }
 }
 
@@ -57,7 +63,7 @@ struct RssEntry {
     id: String,
     title: String,
     authors: Vec<String>,
-    content: String,
+    lines: Vec<String>, // Pre-wrapped content.
     link: String,
     published: Option<DateTime<Utc>>,
     read: bool,
@@ -66,13 +72,19 @@ struct RssEntry {
 impl From<feed_rs::model::Entry> for RssEntry {
     fn from(entry: feed_rs::model::Entry) -> Self {
         let authors = entry.authors.into_iter().map(|a| a.name).collect();
-        let content = entry
+        let lines = entry
             .content
-            .and_then(|c| c.body)
+            .and_then(|c| {
+                let parsed_html =
+                    from_read(c.body?.clone().as_bytes(), 50).expect("Failed to parse HTML");
+                return Some(wrap_text_to_lines(&parsed_html, 50));
+            })
             .or_else(|| {
-                entry
-                    .summary
-                    .map(|s| format!("{}\n\nFull content available online.", s.content))
+                entry.summary.map(|s| {
+                    let formatted_summary =
+                        format!("{}\n\nFull content available online.", s.content);
+                    return wrap_text_to_lines(&formatted_summary, 50);
+                })
             })
             .unwrap_or_default();
 
@@ -83,7 +95,7 @@ impl From<feed_rs::model::Entry> for RssEntry {
                 .map(|t| t.content)
                 .unwrap_or_else(|| "Untitled".into()),
             authors,
-            content,
+            lines,
             link: entry
                 .links
                 .first()
@@ -133,6 +145,11 @@ enum RunningState {
 
 enum AppEvent {
     FeedFetched(Result<feed_rs::model::Feed, String>),
+    ScrapedEntry {
+        rss_feed_index: usize,
+        rss_entry_index: usize,
+        result: Result<String, String>,
+    },
 }
 
 struct App {
@@ -184,11 +201,9 @@ impl App {
         rss_feed_index: usize,
         rss_entry_index: usize,
         area_height: u16,
-        area_width: u16,
     ) -> u16 {
-        let content = &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content;
-        let wrapped_lines = wrap_text_lines(content.as_str(), area_width as usize);
-        let total_lines = wrapped_lines.len() as i32;
+        let lines = &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].lines;
+        let total_lines = lines.len() as i32;
         let visible_lines = area_height as i32;
         let max_scroll = total_lines - visible_lines;
         if max_scroll < 0 { 0 } else { max_scroll as u16 }
@@ -284,13 +299,6 @@ impl App {
     }
 }
 
-fn wrap_text_lines(text: &str, area_width: usize) -> Vec<String> {
-    textwrap::wrap(text, area_width)
-        .into_iter()
-        .map(|c| c.into_owned())
-        .collect()
-}
-
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -318,6 +326,19 @@ fn run_app<B: ratatui::backend::Backend>(
 
 fn handle_app_event(app: &mut App, app_event: AppEvent) {
     match app_event {
+        AppEvent::ScrapedEntry {
+            rss_feed_index,
+            rss_entry_index,
+            result,
+        } => match result {
+            Ok(content) => {
+                let lines = wrap_text_to_lines(&content, app.last_rss_entry_area.width as usize);
+                app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].lines = lines;
+            }
+            Err(err) => {
+                app.error_message = Some(err);
+            }
+        },
         AppEvent::FeedFetched(Ok(feed)) => {
             app.error_message = None;
             let new_rss_feed = RssFeed::from(feed);
@@ -362,10 +383,18 @@ fn handle_delete_rss_feed_popup(app: &mut App, key: KeyEvent, rows: &[Row]) -> R
         KeyCode::Char('y') => {
             let row = &rows[app.cursor];
             match row {
-                Row::RssFeed(rss_feed_index) | Row::RssEntry(rss_feed_index, _) => {
+                Row::RssFeed(rss_feed_index) => {
                     app.delete_rss_feed(*rss_feed_index);
                     if *rss_feed_index > 0 {
                         app.cursor = rss_feed_index - 1;
+                    } else {
+                        app.cursor = 0;
+                    }
+                }
+                Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                    app.delete_rss_feed(*rss_feed_index);
+                    if *rss_feed_index > 0 {
+                        app.cursor = app.cursor - rss_entry_index - 2;
                     } else {
                         app.cursor = 0;
                     }
@@ -452,11 +481,10 @@ fn handle_rss_feeds_view(app: &mut App, key: KeyEvent, rows: &[Row]) -> Result<b
         KeyCode::Char('c') => match rows[app.cursor] {
             Row::RssFeed(rss_feed_index) => {
                 app.rss_feeds[rss_feed_index].expanded = false;
-                app.cursor = rss_feed_index;
             }
-            Row::RssEntry(rss_feed_index, _) => {
+            Row::RssEntry(rss_feed_index, rss_entry_index) => {
                 app.rss_feeds[rss_feed_index].expanded = false;
-                app.cursor = rss_feed_index;
+                app.cursor = app.cursor - rss_entry_index - 1;
             }
         },
         KeyCode::Enter => {
@@ -465,9 +493,9 @@ fn handle_rss_feeds_view(app: &mut App, key: KeyEvent, rows: &[Row]) -> Result<b
                     Row::RssFeed(rss_feed_index) => {
                         app.rss_feeds[rss_feed_index].expanded =
                             !app.rss_feeds[rss_feed_index].expanded;
-                        app.cursor = rss_feed_index;
                     }
                     Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                        app.rss_entry_scroll = 0;
                         app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].read = true;
                         app.view_state = ViewState::RssEntry {
                             rss_feed_index,
@@ -504,6 +532,34 @@ fn handle_rss_entry_view(
                     .clone(),
             )?;
         }
+        KeyCode::Char('f') => {
+            let link = app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
+                .link
+                .clone();
+            let sender = app.sender.clone();
+
+            let html_width = app.last_rss_entry_area.width;
+            tokio::spawn(async move {
+                let result = async {
+                    let html = reqwest::get(&link)
+                        .await
+                        .map_err(|e| format!("Failed to load full content: {}", e.to_string()))?
+                        .text()
+                        .await
+                        .map_err(|e| format!("Failed to load full content: {}", e.to_string()))?;
+                    let parsed_html = from_read(html.as_bytes(), html_width as usize)
+                        .expect("Failed to parse HTML");
+                    Ok(parsed_html)
+                }
+                .await;
+
+                let _ = sender.send(AppEvent::ScrapedEntry {
+                    rss_feed_index,
+                    rss_entry_index,
+                    result,
+                });
+            });
+        }
         KeyCode::Esc | KeyCode::Char('q') => {
             app.view_state = ViewState::RssFeeds;
         }
@@ -514,12 +570,8 @@ fn handle_rss_entry_view(
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let area = app.last_rss_entry_area;
-            let max_rss_entry_scroll = app.get_max_rss_entry_scroll(
-                rss_feed_index,
-                rss_entry_index,
-                area.height,
-                area.width,
-            );
+            let max_rss_entry_scroll =
+                app.get_max_rss_entry_scroll(rss_feed_index, rss_entry_index, area.height);
             if app.rss_entry_scroll < max_rss_entry_scroll {
                 app.rss_entry_scroll += 1;
             }
@@ -529,12 +581,8 @@ fn handle_rss_entry_view(
         }
         KeyCode::End | KeyCode::Char('G') => {
             let area = app.last_rss_entry_area;
-            let max_scroll = app.get_max_rss_entry_scroll(
-                rss_feed_index,
-                rss_entry_index,
-                area.height,
-                area.width,
-            );
+            let max_scroll =
+                app.get_max_rss_entry_scroll(rss_feed_index, rss_entry_index, area.height);
             app.rss_entry_scroll = max_scroll;
         }
         _ => {}
@@ -596,27 +644,42 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
             }
             Row::RssEntry(rss_feed_index, rss_entry_index) => {
                 let rss_entry = &app.rss_feeds[*rss_feed_index].rss_entries[*rss_entry_index];
-                let postfix = if rss_entry.read { "" } else { "*" };
-                ListItem::new(format!("    {}{}", rss_entry.title, postfix))
+                let read_postfix = if rss_entry.read { "" } else { "*" };
+                let text_to_wrap = format!(
+                    "    {}{} - {}",
+                    rss_entry.title,
+                    read_postfix,
+                    rss_entry
+                        .published
+                        .unwrap_or_default()
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %I:%M%P")
+                );
+                let wrapped_lines: Vec<Line> = wrap(&text_to_wrap, area.width as usize)
+                    .into_iter()
+                    .map(|cow| Line::from(cow.into_owned()))
+                    .collect();
+                let text = Text::from(wrapped_lines);
+                ListItem::new(text)
             }
         })
         .collect();
 
     let instructions = Line::from(vec![
         " ↓".into(),
-        "<j> ".blue().bold().into(),
+        "<j> ".light_blue().bold().into(),
         "↑".into(),
-        "<k> ".blue().bold().into(),
+        "<k> ".light_blue().bold().into(),
         "Select".into(),
-        "<Enter> ".blue().bold().into(),
+        "<Enter> ".light_blue().bold().into(),
         "Add".into(),
-        "<a> ".blue().bold().into(),
+        "<a> ".light_blue().bold().into(),
         "Delete".into(),
-        "<d> ".blue().bold().into(),
+        "<d> ".light_blue().bold().into(),
         "Sync".into(),
-        "<s> ".blue().bold().into(),
+        "<s> ".light_blue().bold().into(),
         "Quit".into(),
-        "<q> ".blue().bold().into(),
+        "<q> ".light_blue().bold().into(),
     ]);
 
     let list = List::new(items)
@@ -643,6 +706,28 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn truncate_rss_entry_title(title: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(title) <= max_width {
+        return title.to_string();
+    }
+
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for ch in title.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width >= max_width - 3 {
+            break;
+        }
+        result.push(ch);
+        width += ch_width;
+    }
+    result.push_str("...");
+    result
+}
+
 fn draw_rss_entry(
     frame: &mut ratatui::Frame,
     app: &mut App,
@@ -654,27 +739,32 @@ fn draw_rss_entry(
     let rss_entry = &app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index];
     let instructions = Line::from(vec![
         " ↓".into(),
-        "<j> ".blue().bold().into(),
+        "<j> ".light_blue().bold().into(),
         "↑".into(),
-        "<k> ".blue().bold().into(),
-        "Open in browser".into(),
-        "<o> ".blue().bold().into(),
+        "<k> ".light_blue().bold().into(),
+        "Fetch".into(),
+        "<f> ".light_blue().bold().into(),
+        "Open".into(),
+        "<o> ".light_blue().bold().into(),
         "Help".into(),
-        "<h> ".blue().bold().into(),
+        "<h> ".light_blue().bold().into(),
         "Back".into(),
-        "<q> ".blue().bold().into(),
+        "<q> ".light_blue().bold().into(),
     ]);
-    let content = from_read(rss_entry.content.clone().as_bytes(), size.width as usize)
-        .expect("Failed to read HTML");
-    let paragraph = Paragraph::new(content)
-        .block(
-            Block::default()
-                .title(rss_entry.title.clone())
-                .title_bottom(instructions.centered())
-                .borders(Borders::ALL),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: true })
-        .scroll((app.rss_entry_scroll, 0));
+    let visible_lines = rss_entry
+        .lines
+        .iter()
+        .skip(app.rss_entry_scroll as usize)
+        .take(size.height as usize);
+    let text = visible_lines
+        .map(|l| Line::from(l.clone()))
+        .collect::<Vec<_>>();
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .title(rss_entry.title.clone())
+            .title_bottom(instructions.centered())
+            .borders(Borders::ALL),
+    );
     frame.render_widget(paragraph, size);
 }
 
@@ -694,7 +784,7 @@ fn get_rows(app: &App) -> Vec<Row> {
 
 fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
-    let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
+    let instructions = Line::from(vec![" Back".into(), "<q> ".light_blue().bold().into()]);
     let paragraph = Paragraph::new(String::default())
         .style(Style::default())
         .block(
@@ -714,7 +804,7 @@ fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
 
 fn draw_rss_feed_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
-    let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
+    let instructions = Line::from(vec![" Back".into(), "<q> ".light_blue().bold().into()]);
     let paragraph = Paragraph::new(String::default())
         .style(Style::default())
         .block(
@@ -736,9 +826,9 @@ fn draw_add_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
     let instructions = Line::from(vec![
         " Submit".into(),
-        "<Enter> ".blue().bold().into(),
+        "<Enter> ".light_blue().bold().into(),
         "Back".into(),
-        "<q> ".blue().bold().into(),
+        "<q> ".light_blue().bold().into(),
     ]);
     let input_paragraph = Paragraph::new(app.input.as_str())
         .style(Style::default().fg(Color::Rgb(255, 161, 0)))
@@ -768,34 +858,42 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
     let rows = get_rows(app);
     let row = &rows[app.cursor];
     let rss_feed_name = match row {
-        Row::RssFeed(rss_feed_index) => app.rss_feeds[*rss_feed_index].title.as_str(),
-        Row::RssEntry(rss_feed_index, _) => app.rss_feeds[*rss_feed_index].title.as_str(),
+        Row::RssFeed(rss_feed_index) | Row::RssEntry(rss_feed_index, _) => {
+            app.rss_feeds[*rss_feed_index].title.as_str()
+        }
     };
     let area = frame.area();
     let instructions = Line::from(vec![
         " Yes".into(),
-        "<y> ".blue().bold().into(),
+        "<y> ".light_blue().bold().into(),
         "No".into(),
-        "<n> ".blue().bold().into(),
+        "<n> ".light_blue().bold().into(),
         "Cancel".into(),
-        "<q> ".blue().bold().into(),
+        "<q> ".light_blue().bold().into(),
     ]);
-    let paragraph = Paragraph::new(format!(
+
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let [popup_area] = horizontal.areas(area);
+    let text_width = popup_area.width;
+    let text = format!(
         "Are you sure that you want to delete feed \"{}\"",
         rss_feed_name
-    ))
-    .style(Style::default().fg(Color::Rgb(255, 0, 0)))
-    .block(
-        Block::bordered()
-            .fg(Color::Rgb(255, 0, 0))
-            .title("Delete feed")
-            .title_bottom(instructions.centered()),
     );
-    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
-    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
-    let popup_area = area;
+    let wrapped_text = wrap_text_to_lines(&text, text_width as usize);
+    let height = wrapped_text.len() + 2;
+
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().fg(Color::Rgb(255, 0, 0)))
+        .block(
+            Block::bordered()
+                .fg(Color::Rgb(255, 0, 0))
+                .title("Delete feed")
+                .title_bottom(instructions.centered()),
+        )
+        .wrap(Wrap { trim: true });
+
+    let vertical = Layout::vertical([Constraint::Length(height as u16)]).flex(Flex::Center);
     let [popup_area] = vertical.areas(popup_area);
-    let [popup_area] = horizontal.areas(popup_area);
 
     frame.render_widget(Clear, popup_area);
     frame.render_widget(paragraph, popup_area);
@@ -803,7 +901,7 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
 
 fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
     let area = frame.area();
-    let instructions = Line::from(vec![" Ok".into(), "<Enter> ".blue().bold().into()]);
+    let instructions = Line::from(vec![" Ok".into(), "<Enter> ".light_blue().bold().into()]);
     let paragraph = Paragraph::new(format!("Error: {}", error_message))
         .style(Style::default().fg(Color::Rgb(255, 0, 0)))
         .block(
@@ -820,6 +918,13 @@ fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
 
     frame.render_widget(Clear, popup_area);
     frame.render_widget(paragraph, popup_area);
+}
+
+fn wrap_text_to_lines(text: &str, width: usize) -> Vec<String> {
+    wrap(text, width)
+        .into_iter()
+        .map(|l| l.to_string())
+        .collect()
 }
 
 #[tokio::main]
