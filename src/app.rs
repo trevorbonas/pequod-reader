@@ -591,6 +591,35 @@ impl App {
                     self.get_max_rss_entry_scroll(rss_feed_index, rss_entry_index, area.height);
                 self.rss_entry_scroll = max_scroll;
             }
+            KeyCode::Char('u') => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let half_page = (self.last_frame_area.height - 2) / 2;
+                    if self.rss_entry_scroll.saturating_sub(half_page) == 0 {
+                        self.rss_entry_scroll = 0;
+                    } else {
+                        self.rss_entry_scroll = self.rss_entry_scroll.saturating_sub(half_page);
+                    }
+                } else {
+                    self.last_key = Some(KeyCode::Char('u'));
+                }
+            }
+            KeyCode::Char('d') => {
+                let rss_entry = &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index];
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let frame_height = self.last_frame_area.height;
+                    let half_page = (self.last_frame_area.height - 2) / 2;
+                    if self.rss_entry_scroll + half_page
+                        >= (rss_entry.content_total_lines as u16).saturating_sub(frame_height)
+                    {
+                        self.rss_entry_scroll =
+                            ((rss_entry.content_total_lines) as u16).saturating_sub(frame_height);
+                    } else {
+                        self.rss_entry_scroll += half_page;
+                    }
+                } else {
+                    self.last_key = Some(KeyCode::Char('d'));
+                }
+            }
             _ => {}
         }
         Ok(false)
