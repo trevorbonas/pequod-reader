@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use crossterm::event::{KeyCode, KeyEvent};
 use html2text::from_read;
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
@@ -7,7 +8,7 @@ use std::char;
 use std::cmp::{PartialEq, Reverse};
 use tokio::sync::mpsc;
 
-use crate::tui::{PopupState, ViewState};
+use crate::tui::{PopupState, Row, ViewState};
 
 pub struct RssFeed {
     pub id: String,
@@ -250,5 +251,272 @@ impl App {
 
     fn reset_cursor(&mut self) {
         self.character_index = 0;
+    }
+
+    pub fn handle_app_event(&mut self, app_event: AppEvent) {
+        match app_event {
+            AppEvent::ScrapedEntry {
+                rss_feed_index,
+                rss_entry_index,
+                result,
+            } => match result {
+                Ok(content) => {
+                    self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content = content;
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                }
+            },
+            AppEvent::FeedFetched(Ok(feed)) => {
+                self.error_message = None;
+                let new_rss_feed = RssFeed::from(feed);
+                self.rss_feeds.push(new_rss_feed);
+            }
+            AppEvent::FeedFetched(Err(err)) => {
+                self.error_message = Some(err);
+            }
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+        match self.popup {
+            PopupState::AddRssFeed => self.handle_add_rss_feed_popup(key),
+            PopupState::ConfirmDeleteRssFeed => self.handle_delete_rss_feed_popup(key, rows),
+            PopupState::Error => self.handle_error_popup(key),
+            PopupState::RssEntryHelp => self.handle_rss_entry_help_popup(key),
+            PopupState::RssFeedHelp => self.handle_rss_feed_help_popup(key),
+            PopupState::None => self.handle_default(key, rows),
+        }
+    }
+
+    fn handle_add_rss_feed_popup(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.popup = PopupState::None,
+            KeyCode::Enter => {
+                self.add_rss_feed();
+                self.popup = PopupState::None;
+            }
+            KeyCode::Char(c) => self.enter_char(c),
+            KeyCode::Backspace => self.delete_char(),
+            KeyCode::Left => self.move_cursor_left(),
+            KeyCode::Right => self.move_cursor_right(),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_delete_rss_feed_popup(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => self.popup = PopupState::None,
+            KeyCode::Char('y') => {
+                let row = &rows[self.cursor];
+                match row {
+                    Row::RssFeed(rss_feed_index) => {
+                        self.delete_rss_feed(*rss_feed_index);
+                        if *rss_feed_index > 0 {
+                            self.cursor = rss_feed_index - 1;
+                        } else {
+                            self.cursor = 0;
+                        }
+                    }
+                    Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                        self.delete_rss_feed(*rss_feed_index);
+                        if *rss_feed_index > 0 {
+                            self.cursor = self.cursor - rss_entry_index - 2;
+                        } else {
+                            self.cursor = 0;
+                        }
+                    }
+                }
+                self.popup = PopupState::None;
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_error_popup(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.error_message = None;
+                self.popup = PopupState::None;
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_rss_feed_help_popup(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.popup = PopupState::None,
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_rss_entry_help_popup(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.popup = PopupState::None,
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_default(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+        match self.view_state {
+            ViewState::RssFeeds => self.handle_rss_feeds_view(key, rows),
+            ViewState::RssEntry {
+                rss_feed_index,
+                rss_entry_index,
+            } => self.handle_rss_entry_view(key, rss_feed_index, rss_entry_index),
+        }
+    }
+
+    fn handle_rss_feeds_view(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('H') => {
+                // TODO: Update to visible top.
+                self.cursor = 0;
+            }
+            KeyCode::Char('M') => {
+                // TODO: Update to visible middle.
+                self.cursor = rows.len() / 2 as usize;
+            }
+            KeyCode::Char('L') => {
+                // TODO: Update to visible bottom.
+                self.cursor = rows.len() - 1;
+            }
+            KeyCode::Char('G') => {
+                self.cursor = rows.len() - 1;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(true),
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.cursor + 1 < rows.len() {
+                    self.cursor += 1;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+            }
+            KeyCode::Char('a') => {
+                self.popup = PopupState::AddRssFeed;
+            }
+            KeyCode::Char('h') => {
+                self.popup = PopupState::RssFeedHelp;
+            }
+            KeyCode::Char('c') => match rows[self.cursor] {
+                Row::RssFeed(rss_feed_index) => {
+                    self.rss_feeds[rss_feed_index].expanded = false;
+                }
+                Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                    self.rss_feeds[rss_feed_index].expanded = false;
+                    self.cursor = self.cursor - rss_entry_index - 1;
+                }
+            },
+            KeyCode::Enter => {
+                if rows.len() > 0 {
+                    match rows[self.cursor] {
+                        Row::RssFeed(rss_feed_index) => {
+                            self.rss_feeds[rss_feed_index].expanded =
+                                !self.rss_feeds[rss_feed_index].expanded;
+                        }
+                        Row::RssEntry(rss_feed_index, rss_entry_index) => {
+                            self.rss_entry_scroll = 0;
+                            self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].read = true;
+                            self.view_state = ViewState::RssEntry {
+                                rss_feed_index,
+                                rss_entry_index,
+                            };
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('d') => match rows[self.cursor] {
+                Row::RssFeed(_) => {
+                    self.popup = PopupState::ConfirmDeleteRssFeed;
+                }
+                Row::RssEntry(_, _) => {
+                    self.popup = PopupState::ConfirmDeleteRssFeed;
+                }
+            },
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_rss_entry_view(
+        &mut self,
+        key: KeyEvent,
+        rss_feed_index: usize,
+        rss_entry_index: usize,
+    ) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('o') => {
+                open::that(
+                    self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
+                        .link
+                        .clone(),
+                )?;
+            }
+            KeyCode::Char('f') => {
+                let link = self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
+                    .link
+                    .clone();
+                let sender = self.sender.clone();
+
+                let html_width = self.last_rss_entry_area.width;
+                tokio::spawn(async move {
+                    let result = async {
+                        let html = reqwest::get(&link)
+                            .await
+                            .map_err(|e| format!("Failed to load full content: {}", e.to_string()))?
+                            .text()
+                            .await
+                            .map_err(|e| {
+                                format!("Failed to load full content: {}", e.to_string())
+                            })?;
+                        let parsed_html = from_read(html.as_bytes(), html_width as usize)
+                            .expect("Failed to parse HTML");
+                        Ok(parsed_html)
+                    }
+                    .await;
+
+                    let _ = sender.send(AppEvent::ScrapedEntry {
+                        rss_feed_index,
+                        rss_entry_index,
+                        result,
+                    });
+                });
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.view_state = ViewState::RssFeeds;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.rss_entry_scroll > 0 {
+                    self.rss_entry_scroll -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let area = self.last_rss_entry_area;
+                let max_rss_entry_scroll =
+                    self.get_max_rss_entry_scroll(rss_feed_index, rss_entry_index, area.height);
+                if self.rss_entry_scroll < max_rss_entry_scroll {
+                    self.rss_entry_scroll += 1;
+                }
+            }
+            KeyCode::Char('h') => {
+                self.popup = PopupState::RssEntryHelp;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                let area = self.last_rss_entry_area;
+                let max_scroll =
+                    self.get_max_rss_entry_scroll(rss_feed_index, rss_entry_index, area.height);
+                self.rss_entry_scroll = max_scroll;
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 }
