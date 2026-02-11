@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use html2text::from_read;
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
@@ -470,14 +470,35 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('d') => {
-                self.last_key = Some(KeyCode::Char('d'));
-                match rows[self.cursor] {
-                    Row::RssFeed(_) => {
-                        self.popup = PopupState::ConfirmDeleteRssFeed;
+            KeyCode::Char('u') => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let half_page = (self.last_frame_area.height as usize - 2) / 2;
+                    if self.cursor.saturating_sub(half_page) == 0 {
+                        self.cursor = 0;
+                    } else {
+                        self.cursor = self.cursor.saturating_sub(half_page);
                     }
-                    Row::RssEntry(_, _) => {
-                        self.popup = PopupState::ConfirmDeleteRssFeed;
+                } else {
+                    self.last_key = Some(KeyCode::Char('u'));
+                }
+            }
+            KeyCode::Char('d') => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    let half_page = (self.last_frame_area.height as usize - 2) / 2;
+                    if self.cursor + half_page >= rows.len() {
+                        self.cursor = rows.len() - 1;
+                    } else {
+                        self.cursor += half_page;
+                    }
+                } else {
+                    self.last_key = Some(KeyCode::Char('d'));
+                    match rows[self.cursor] {
+                        Row::RssFeed(_) => {
+                            self.popup = PopupState::ConfirmDeleteRssFeed;
+                        }
+                        Row::RssEntry(_, _) => {
+                            self.popup = PopupState::ConfirmDeleteRssFeed;
+                        }
                     }
                 }
             }
