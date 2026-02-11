@@ -291,9 +291,15 @@ impl App {
 
     fn handle_add_rss_feed_popup(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.popup = PopupState::None,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.input.clear();
+                self.character_index = 0;
+                self.popup = PopupState::None;
+            }
             KeyCode::Enter => {
                 self.add_rss_feed();
+                self.input.clear();
+                self.character_index = 0;
                 self.popup = PopupState::None;
             }
             KeyCode::Char(c) => self.enter_char(c),
