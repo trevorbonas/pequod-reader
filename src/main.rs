@@ -7,7 +7,7 @@ use html2text::from_read;
 use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Margin, Position};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Span, Text};
+use ratatui::text::Span;
 use ratatui::widgets::{
     Borders, Clear, List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
@@ -20,7 +20,7 @@ use ratatui::{
 };
 use std::char;
 use std::cmp::{PartialEq, Reverse};
-use textwrap::{Options, wrap};
+use textwrap::WrapAlgorithm;
 use tokio::sync::mpsc;
 use unicode_width::{self, UnicodeWidthChar, UnicodeWidthStr};
 
@@ -63,7 +63,7 @@ struct RssEntry {
     id: String,
     title: String,
     authors: Vec<String>,
-    lines: Vec<String>, // Pre-wrapped content.
+    content: String,
     link: String,
     published: Option<DateTime<Utc>>,
     read: bool,
@@ -72,18 +72,18 @@ struct RssEntry {
 impl From<feed_rs::model::Entry> for RssEntry {
     fn from(entry: feed_rs::model::Entry) -> Self {
         let authors = entry.authors.into_iter().map(|a| a.name).collect();
-        let lines = entry
+        let content = entry
             .content
             .and_then(|c| {
-                let parsed_html =
-                    from_read(c.body?.clone().as_bytes(), 50).expect("Failed to parse HTML");
-                return Some(wrap_text_to_lines(&parsed_html, 50));
+                let parsed_html = from_read(c.body?.clone().as_bytes(), usize::MAX)
+                    .expect("Failed to parse HTML");
+                return Some(parsed_html);
             })
             .or_else(|| {
                 entry.summary.map(|s| {
                     let formatted_summary =
                         format!("{}\n\nFull content available online.", s.content);
-                    return wrap_text_to_lines(&formatted_summary, 50);
+                    return formatted_summary;
                 })
             })
             .unwrap_or_default();
@@ -95,7 +95,7 @@ impl From<feed_rs::model::Entry> for RssEntry {
                 .map(|t| t.content)
                 .unwrap_or_else(|| "Untitled".into()),
             authors,
-            lines,
+            content: content,
             link: entry
                 .links
                 .first()
@@ -202,8 +202,8 @@ impl App {
         rss_entry_index: usize,
         area_height: u16,
     ) -> u16 {
-        let lines = &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].lines;
-        let total_lines = lines.len() as i32;
+        let content = &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content;
+        let total_lines = content.len() as i32;
         let visible_lines = area_height as i32;
         let max_scroll = total_lines - visible_lines;
         if max_scroll < 0 { 0 } else { max_scroll as u16 }
@@ -332,8 +332,7 @@ fn handle_app_event(app: &mut App, app_event: AppEvent) {
             result,
         } => match result {
             Ok(content) => {
-                let lines = wrap_text_to_lines(&content, app.last_rss_entry_area.width as usize);
-                app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].lines = lines;
+                app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content = content;
             }
             Err(err) => {
                 app.error_message = Some(err);
@@ -644,7 +643,7 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
             }
             Row::RssEntry(rss_feed_index, rss_entry_index) => {
                 let rss_entry = &app.rss_feeds[*rss_feed_index].rss_entries[*rss_entry_index];
-                let wrapped_title = wrap(&rss_entry.title, (area.width - 24) as usize);
+                let wrapped_title = textwrap::wrap(&rss_entry.title, (area.width - 24) as usize);
                 let date = rss_entry
                     .published
                     .unwrap_or_default()
@@ -716,9 +715,9 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn truncate_rss_entry_title(title: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(title) <= max_width {
-        return title.to_string();
+fn truncate_str(str_to_truncate: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(str_to_truncate) <= max_width {
+        return str_to_truncate.to_string();
     }
 
     if max_width <= 3 {
@@ -726,7 +725,7 @@ fn truncate_rss_entry_title(title: &str, max_width: usize) -> String {
     }
     let mut result = String::new();
     let mut width = 0;
-    for ch in title.chars() {
+    for ch in str_to_truncate.chars() {
         let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width + ch_width >= max_width - 3 {
             break;
@@ -761,17 +760,19 @@ fn draw_rss_entry(
         "Back".into(),
         "<q> ".blue().bold().into(),
     ]);
-    let visible_lines = rss_entry
-        .lines
+    let wrapped_lines = wrap_str(&rss_entry.content, (frame.area().width - 2) as usize);
+    let visible_lines = wrapped_lines
         .iter()
         .skip(app.rss_entry_scroll as usize)
         .take(size.height as usize);
     let text = visible_lines
         .map(|l| Line::from(l.clone()))
         .collect::<Vec<_>>();
+    let truncated_title =
+        truncate_str(&rss_entry.title, (frame.area().width - 2) as usize);
     let paragraph = Paragraph::new(text).block(
         Block::default()
-            .title(rss_entry.title.clone().bold())
+            .title(truncated_title.clone().bold())
             .title_bottom(instructions.centered())
             .borders(Borders::ALL),
     );
@@ -889,7 +890,7 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
         "Are you sure that you want to delete feed \"{}\"",
         rss_feed_name
     );
-    let wrapped_text = wrap_text_to_lines(&text, text_width as usize);
+    let wrapped_text = wrap_str(&text, text_width as usize);
     let height = wrapped_text.len() + 2;
 
     let paragraph = Paragraph::new(text)
@@ -930,8 +931,9 @@ fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
     frame.render_widget(paragraph, popup_area);
 }
 
-fn wrap_text_to_lines(text: &str, width: usize) -> Vec<String> {
-    wrap(text, width)
+fn wrap_str(text: &str, width: usize) -> Vec<String> {
+    let options = textwrap::Options::new(width).break_words(false);
+    textwrap::wrap(text, options)
         .into_iter()
         .map(|l| l.to_string())
         .collect()
