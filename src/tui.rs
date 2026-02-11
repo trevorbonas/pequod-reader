@@ -103,16 +103,28 @@ pub fn ui(app: &mut App, frame: &mut Frame) {
     }
 }
 
-fn draw_list(frame: &mut ratatui::Frame, app: &App) {
+fn draw_list(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
+    app.last_frame_area = area;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(area);
 
     let rows = get_rows(app);
+    let visible_height = area.height as usize - 2;
+    let start = if rows.len() <= visible_height {
+        0
+    } else if app.cursor < visible_height / 2 {
+        0
+    } else if app.cursor + visible_height / 2 >= rows.len() {
+        rows.len() - visible_height
+    } else {
+        app.cursor - visible_height / 2
+    };
+    let visible_rows = &rows[start..start + visible_height.min(rows.len() - start)];
 
-    let items: Vec<ListItem> = rows
+    let items: Vec<ListItem> = visible_rows
         .iter()
         .map(|row| match row {
             Row::RssFeed(rss_feed_index) => {
@@ -188,7 +200,7 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
     let mut state = ratatui::widgets::ListState::default();
-    state.select(Some(app.cursor));
+    state.select(Some(app.cursor.saturating_sub(start)));
 
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
     frame.render_stateful_widget(
@@ -231,8 +243,8 @@ fn draw_rss_entry(
     rss_entry_index: usize,
 ) {
     let size = frame.area();
-    app.last_rss_entry_area = size;
-    let rss_entry = &app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index];
+    app.last_frame_area = size;
+    let rss_entry = &mut app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index];
     let instructions = Line::from(vec![
         " ↓".into(),
         "<j> ".blue().bold().into(),
@@ -248,6 +260,7 @@ fn draw_rss_entry(
         "<q> ".blue().bold().into(),
     ]);
     let wrapped_lines = wrap_str(&rss_entry.content, (frame.area().width - 2) as usize);
+    rss_entry.content_total_lines = wrapped_lines.len();
     let visible_lines = wrapped_lines
         .iter()
         .skip(app.rss_entry_scroll as usize)
