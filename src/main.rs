@@ -644,48 +644,58 @@ fn draw_list(frame: &mut ratatui::Frame, app: &App) {
             }
             Row::RssEntry(rss_feed_index, rss_entry_index) => {
                 let rss_entry = &app.rss_feeds[*rss_feed_index].rss_entries[*rss_entry_index];
-                let read_postfix = if rss_entry.read { "" } else { "*" };
-                let text_to_wrap = format!(
-                    "    {}{} - {}",
-                    rss_entry.title,
-                    read_postfix,
-                    rss_entry
-                        .published
-                        .unwrap_or_default()
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %I:%M%P")
-                );
-                let wrapped_lines: Vec<Line> = wrap(&text_to_wrap, area.width as usize)
-                    .into_iter()
-                    .map(|cow| Line::from(cow.into_owned()))
-                    .collect();
-                let text = Text::from(wrapped_lines);
-                ListItem::new(text)
+                let wrapped_title = wrap(&rss_entry.title, (area.width - 24) as usize);
+                let date = rss_entry
+                    .published
+                    .unwrap_or_default()
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %I:%M%P")
+                    .to_string();
+
+                let mut lines: Vec<Line> = Vec::new();
+
+                for (i, wrapped_line) in wrapped_title.iter().enumerate() {
+                    let mut spans: Vec<Span> = Vec::new();
+                    spans.push(Span::raw("    "));
+                    spans.push(Span::raw(wrapped_line.to_string()));
+                    if i == wrapped_title.len() - 1 {
+                        if !rss_entry.read {
+                            spans.push(Span::styled(
+                                "*",
+                                Style::default().fg(Color::Rgb(255, 179, 0)),
+                            ));
+                        }
+                        spans.push(Span::styled(format!(" {}", date), Style::default().dim()));
+                    }
+                    lines.push(Line::from(spans));
+                }
+
+                ListItem::from(lines)
             }
         })
         .collect();
 
     let instructions = Line::from(vec![
         " ↓".into(),
-        "<j> ".light_blue().bold().into(),
+        "<j> ".blue().bold().into(),
         "↑".into(),
-        "<k> ".light_blue().bold().into(),
+        "<k> ".blue().bold().into(),
         "Select".into(),
-        "<Enter> ".light_blue().bold().into(),
+        "<Enter> ".blue().bold().into(),
         "Add".into(),
-        "<a> ".light_blue().bold().into(),
+        "<a> ".blue().bold().into(),
         "Delete".into(),
-        "<d> ".light_blue().bold().into(),
+        "<d> ".blue().bold().into(),
         "Sync".into(),
-        "<s> ".light_blue().bold().into(),
+        "<s> ".blue().bold().into(),
         "Quit".into(),
-        "<q> ".light_blue().bold().into(),
+        "<q> ".blue().bold().into(),
     ]);
 
     let list = List::new(items)
         .block(
             Block::default()
-                .title("Feeds".green().bold())
+                .title("Feeds".bold())
                 .borders(Borders::ALL)
                 .title_bottom(instructions.centered()),
         )
@@ -739,17 +749,17 @@ fn draw_rss_entry(
     let rss_entry = &app.rss_feeds[rss_feed_index].rss_entries[rss_entry_index];
     let instructions = Line::from(vec![
         " ↓".into(),
-        "<j> ".light_blue().bold().into(),
+        "<j> ".blue().bold().into(),
         "↑".into(),
-        "<k> ".light_blue().bold().into(),
+        "<k> ".blue().bold().into(),
         "Fetch".into(),
-        "<f> ".light_blue().bold().into(),
+        "<f> ".blue().bold().into(),
         "Open".into(),
-        "<o> ".light_blue().bold().into(),
+        "<o> ".blue().bold().into(),
         "Help".into(),
-        "<h> ".light_blue().bold().into(),
+        "<h> ".blue().bold().into(),
         "Back".into(),
-        "<q> ".light_blue().bold().into(),
+        "<q> ".blue().bold().into(),
     ]);
     let visible_lines = rss_entry
         .lines
@@ -761,7 +771,7 @@ fn draw_rss_entry(
         .collect::<Vec<_>>();
     let paragraph = Paragraph::new(text).block(
         Block::default()
-            .title(rss_entry.title.clone())
+            .title(rss_entry.title.clone().bold())
             .title_bottom(instructions.centered())
             .borders(Borders::ALL),
     );
@@ -784,7 +794,7 @@ fn get_rows(app: &App) -> Vec<Row> {
 
 fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
-    let instructions = Line::from(vec![" Back".into(), "<q> ".light_blue().bold().into()]);
+    let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
     let paragraph = Paragraph::new(String::default())
         .style(Style::default())
         .block(
@@ -804,7 +814,7 @@ fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
 
 fn draw_rss_feed_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
-    let instructions = Line::from(vec![" Back".into(), "<q> ".light_blue().bold().into()]);
+    let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
     let paragraph = Paragraph::new(String::default())
         .style(Style::default())
         .block(
@@ -826,9 +836,9 @@ fn draw_add_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
     let instructions = Line::from(vec![
         " Submit".into(),
-        "<Enter> ".light_blue().bold().into(),
+        "<Enter> ".blue().bold().into(),
         "Back".into(),
-        "<q> ".light_blue().bold().into(),
+        "<q> ".blue().bold().into(),
     ]);
     let input_paragraph = Paragraph::new(app.input.as_str())
         .style(Style::default().fg(Color::Rgb(255, 161, 0)))
@@ -865,11 +875,11 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
     let area = frame.area();
     let instructions = Line::from(vec![
         " Yes".into(),
-        "<y> ".light_blue().bold().into(),
+        "<y> ".blue().bold().into(),
         "No".into(),
-        "<n> ".light_blue().bold().into(),
+        "<n> ".blue().bold().into(),
         "Cancel".into(),
-        "<q> ".light_blue().bold().into(),
+        "<q> ".blue().bold().into(),
     ]);
 
     let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
@@ -901,7 +911,7 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
 
 fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
     let area = frame.area();
-    let instructions = Line::from(vec![" Ok".into(), "<Enter> ".light_blue().bold().into()]);
+    let instructions = Line::from(vec![" Ok".into(), "<Enter> ".blue().bold().into()]);
     let paragraph = Paragraph::new(format!("Error: {}", error_message))
         .style(Style::default().fg(Color::Rgb(255, 0, 0)))
         .block(
