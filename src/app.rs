@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use feed_rs::model::Content;
 use html2text::from_read;
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
@@ -60,15 +61,15 @@ impl From<feed_rs::model::Entry> for RssEntry {
         let content = entry
             .content
             .and_then(|c| {
-                let parsed_html = from_read(c.body?.clone().as_bytes(), usize::MAX)
-                    .expect("Failed to parse HTML");
+                let parsed_html =
+                    from_read(c.body?.clone().as_bytes(), usize::MAX).unwrap_or_default();
                 return Some(parsed_html);
             })
             .or_else(|| {
                 entry.summary.map(|s| {
-                    let formatted_summary =
-                        format!("{}\n\nFull content available online.", s.content);
-                    return formatted_summary;
+                    let parsed_html =
+                        from_read(s.content.as_bytes(), usize::MAX).unwrap_or_default();
+                    return parsed_html;
                 })
             })
             .unwrap_or_default();
@@ -260,6 +261,35 @@ impl App {
         self.character_index = 0;
     }
 
+    fn fetch_full_rss_entry_content(&mut self, rss_feed_index: usize, rss_entry_index: usize) {
+        let sender = self.sender.clone();
+        let link = self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
+            .link
+            .clone();
+
+        let html_width = self.last_frame_area.width;
+        tokio::spawn(async move {
+            let result = async {
+                let html = reqwest::get(&link)
+                    .await
+                    .map_err(|e| format!("Failed to load full content: {}", e.to_string()))?
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to load full content: {}", e.to_string()))?;
+                let parsed_html =
+                    from_read(html.as_bytes(), html_width as usize).expect("Failed to parse HTML");
+                Ok(parsed_html)
+            }
+            .await;
+
+            let _ = sender.send(AppEvent::ScrapedEntry {
+                rss_feed_index,
+                rss_entry_index,
+                result,
+            });
+        });
+    }
+
     pub fn handle_app_event(&mut self, app_event: AppEvent) {
         match app_event {
             AppEvent::ScrapedEntry {
@@ -269,16 +299,17 @@ impl App {
             } => match result {
                 Ok(content) => {
                     self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content = content;
+                    self.error_message = None;
                 }
                 Err(err) => {
                     self.error_message = Some(err);
                 }
             },
             AppEvent::FeedFetched(Ok(feed)) => {
-                self.error_message = None;
                 let new_rss_feed = RssFeed::from(feed);
                 self.rss_feeds.push(new_rss_feed);
-            }
+                self.error_message = None;
+            },
             AppEvent::FeedFetched(Err(err)) => {
                 self.error_message = Some(err);
             }
@@ -524,34 +555,7 @@ impl App {
             }
             KeyCode::Char('f') => {
                 self.last_key = Some(KeyCode::Char('f'));
-                let link = self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
-                    .link
-                    .clone();
-                let sender = self.sender.clone();
-
-                let html_width = self.last_frame_area.width;
-                tokio::spawn(async move {
-                    let result = async {
-                        let html = reqwest::get(&link)
-                            .await
-                            .map_err(|e| format!("Failed to load full content: {}", e.to_string()))?
-                            .text()
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to load full content: {}", e.to_string())
-                            })?;
-                        let parsed_html = from_read(html.as_bytes(), html_width as usize)
-                            .expect("Failed to parse HTML");
-                        Ok(parsed_html)
-                    }
-                    .await;
-
-                    let _ = sender.send(AppEvent::ScrapedEntry {
-                        rss_feed_index,
-                        rss_entry_index,
-                        result,
-                    });
-                });
+                self.fetch_full_rss_entry_content(rss_feed_index, rss_entry_index);
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.last_key = Some(KeyCode::Char('q'));

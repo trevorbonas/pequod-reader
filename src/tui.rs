@@ -128,21 +128,40 @@ fn draw_list(frame: &mut ratatui::Frame, app: &mut App) {
         .iter()
         .map(|row| match row {
             Row::RssFeed(rss_feed_index) => {
-                let feed = &app.rss_feeds[*rss_feed_index];
-                let num_unread_rss_entries =
-                    feed.rss_entries.iter().filter(|a| a.read == false).count();
-                let num_unread_rss_entries_formatted = format!(" {}*", num_unread_rss_entries);
-                let postfix = if num_unread_rss_entries == 0 {
-                    ""
+                let rss_feed = &app.rss_feeds[*rss_feed_index];
+                let mut spans: Vec<Span> = Vec::new();
+                let prefix = if rss_feed.expanded {
+                    Span::raw("▼ ")
                 } else {
-                    &num_unread_rss_entries_formatted
+                    Span::raw("▶ ")
                 };
-                let prefix = if feed.expanded { "▼ " } else { "▶ " };
-                ListItem::new(format!("{}{}{}", prefix, feed.title, postfix))
+                spans.push(prefix);
+                let truncated_title = truncate_str(&rss_feed.title, area.width as usize);
+                spans.push(Span::raw(truncated_title));
+                let num_unread_rss_entries = rss_feed
+                    .rss_entries
+                    .iter()
+                    .filter(|a| a.read == false)
+                    .count();
+                let num_unread_rss_entries_formatted =
+                    Span::raw(format!(" {}*", num_unread_rss_entries)).fg(Color::Rgb(255, 179, 0));
+                let postfix = if num_unread_rss_entries == 0 {
+                    Span::default()
+                } else {
+                    num_unread_rss_entries_formatted
+                };
+                spans.push(postfix);
+
+                ListItem::new(Line::from(spans))
             }
             Row::RssEntry(rss_feed_index, rss_entry_index) => {
                 let rss_entry = &app.rss_feeds[*rss_feed_index].rss_entries[*rss_entry_index];
-                let wrapped_title = textwrap::wrap(&rss_entry.title, (area.width - 24) as usize);
+                let wrapped_width = if area.width.saturating_sub(24) > 0 {
+                    area.width.saturating_sub(24)
+                } else {
+                    area.width
+                };
+                let wrapped_title = textwrap::wrap(&rss_entry.title, (wrapped_width) as usize);
                 let date = rss_entry
                     .published
                     .unwrap_or_default()
