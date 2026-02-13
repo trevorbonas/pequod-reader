@@ -9,8 +9,9 @@ use std::char;
 use std::cmp::{PartialEq, Reverse};
 use tokio::sync::mpsc;
 
-use crate::tui::{PopupState, Row, ViewState};
+use crate::tui::{PopupState, Row, SPINNER_CHARS, ViewState};
 
+#[derive(Clone)]
 pub struct RssFeed {
     pub id: String,
     pub title: String,
@@ -102,12 +103,13 @@ enum RunningState {
 }
 
 pub enum AppEvent {
-    FeedFetched(Result<feed_rs::model::Feed, String>),
+    FeedFetched(Result<(feed_rs::model::Feed), String>, String),
     ScrapedEntry {
         rss_feed_index: usize,
         rss_entry_index: usize,
         result: Result<String, String>,
     },
+    SyncFinished(Result<Vec<RssFeed>, anyhow::Error>),
 }
 
 pub struct App {
@@ -136,6 +138,8 @@ pub struct App {
     pub rss_entry_scroll: u16,
     // Previous frame area. Used for visual navigation.
     pub last_frame_area: Rect,
+    pub syncing: bool,
+    pub spinner_index: usize,
 }
 
 impl App {
@@ -154,6 +158,8 @@ impl App {
             scrollbar_state: ScrollbarState::new(0),
             rss_entry_scroll: 0,
             last_frame_area: Rect::default(),
+            syncing: false,
+            spinner_index: 0,
         }
     }
 
@@ -193,7 +199,7 @@ impl App {
                 Ok(feed)
             }
             .await;
-            let _ = sender.send(AppEvent::FeedFetched(result));
+            let _ = sender.send(AppEvent::FeedFetched(result, rss_feed_url));
         });
     }
 
@@ -261,6 +267,21 @@ impl App {
         self.character_index = 0;
     }
 
+    fn sync(&mut self) {
+        let sender = self.sender.clone();
+        let rss_feeds = self.rss_feeds.clone();
+        tokio::spawn(async move {
+            let result = sync_feeds(rss_feeds).await;
+            let _ = sender.send(AppEvent::SyncFinished(result));
+        });
+    }
+
+    pub fn on_tick(&mut self) {
+        if self.syncing {
+            self.spinner_index = (self.spinner_index + 1) % SPINNER_CHARS.len();
+        }
+    }
+
     fn fetch_full_rss_entry_content(&mut self, rss_feed_index: usize, rss_entry_index: usize) {
         let sender = self.sender.clone();
         let link = self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
@@ -305,13 +326,26 @@ impl App {
                     self.error_message = Some(err);
                 }
             },
-            AppEvent::FeedFetched(Ok(feed)) => {
-                let new_rss_feed = RssFeed::from(feed);
+            AppEvent::FeedFetched(Ok(feed), feed_url) => {
+                let mut new_rss_feed = RssFeed::from(feed);
+                new_rss_feed.link = feed_url;
                 self.rss_feeds.push(new_rss_feed);
                 self.error_message = None;
-            },
-            AppEvent::FeedFetched(Err(err)) => {
+            }
+            AppEvent::FeedFetched(Err(err), _) => {
                 self.error_message = Some(err);
+            }
+            AppEvent::SyncFinished(result) => {
+                self.popup = PopupState::None;
+                self.syncing = false;
+                match result {
+                    Ok(rss_feeds) => {
+                        self.rss_feeds = rss_feeds;
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Sync failed: {}", e));
+                    }
+                }
             }
         }
     }
@@ -324,6 +358,7 @@ impl App {
             PopupState::RssEntryHelp => self.handle_rss_entry_help_popup(key),
             PopupState::RssFeedHelp => self.handle_rss_feed_help_popup(key),
             PopupState::None => self.handle_default(key, rows),
+            PopupState::Syncing => Ok(false),
         }
     }
 
@@ -418,6 +453,11 @@ impl App {
 
     fn handle_rss_feeds_view(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
         match key.code {
+            KeyCode::Char('s') => {
+                self.popup = PopupState::Syncing;
+                self.syncing = true;
+                self.sync();
+            }
             KeyCode::Char('g') => {
                 if self.last_key == Some(KeyCode::Char('g')) {
                     self.cursor = 0;
@@ -628,4 +668,26 @@ impl App {
         }
         Ok(false)
     }
+}
+
+/// Update a Vec<RssFeeds>, adding newer RSS entries.
+async fn sync_feeds(mut rss_feeds: Vec<RssFeed>) -> Result<Vec<RssFeed>> {
+    let client = reqwest::Client::new();
+    for rss_feed in rss_feeds.iter_mut() {
+        let newest_date = rss_feed
+            .rss_entries
+            .first()
+            .and_then(|e| e.published)
+            .unwrap_or_default();
+        let response_text = client.get(&rss_feed.link).send().await?.text().await?;
+        let updated_feed = feed_rs::parser::parse(response_text.as_bytes())?;
+        for entry in updated_feed.entries {
+            if entry.published.unwrap_or_default() > newest_date {
+                let rss_entry = RssEntry::from(entry);
+                rss_feed.rss_entries.push(rss_entry)
+            }
+        }
+        rss_feed.rss_entries.sort_by_key(|e| Reverse(e.published));
+    }
+    Ok(rss_feeds)
 }

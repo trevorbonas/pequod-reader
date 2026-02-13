@@ -21,6 +21,8 @@ use ratatui::{backend::CrosstermBackend, crossterm::terminal::EnterAlternateScre
 
 use crate::app::App;
 
+pub const SPINNER_CHARS: &[char] = &['/', '-', '\\', '|'];
+
 pub enum Row {
     RssFeed(usize),         // Feed index.
     RssEntry(usize, usize), // Feed index and entry index.
@@ -48,6 +50,7 @@ pub enum PopupState {
     // Help popup displaying keybinds and helpful information.
     RssEntryHelp,
     RssFeedHelp,
+    Syncing,
 }
 
 /// A type alias for the terminal type used in this application
@@ -96,6 +99,9 @@ pub fn ui(app: &mut App, frame: &mut Frame) {
     }
     if let PopupState::ConfirmDeleteRssFeed = app.popup {
         draw_confirm_delete_rss_feed_popup(frame, app);
+    }
+    if let PopupState::Syncing = app.popup {
+        draw_syncing_popup(frame, app);
     }
     if let Some(error_message) = app.error_message.clone() {
         app.popup = PopupState::Error;
@@ -423,6 +429,24 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
 
     let vertical = Layout::vertical([Constraint::Length(height as u16)]).flex(Flex::Center);
     let [popup_area] = vertical.areas(popup_area);
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_syncing_popup(frame: &mut ratatui::Frame, app: &mut App) {
+    let area = frame.area();
+    let spinner_char = SPINNER_CHARS[app.spinner_index];
+    let syncing_text = format!("Syncing {}", spinner_char);
+    let paragraph = Paragraph::new(syncing_text)
+        .style(Style::default().fg(Color::Rgb(255, 239, 0)))
+        .centered()
+        .block(Block::bordered().fg(Color::Rgb(255, 239, 0)));
+    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
+    let popup_area = area;
+    let [popup_area] = vertical.areas(popup_area);
+    let [popup_area] = horizontal.areas(popup_area);
 
     frame.render_widget(Clear, popup_area);
     frame.render_widget(paragraph, popup_area);

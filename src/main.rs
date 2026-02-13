@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -16,16 +18,25 @@ fn run_app<B: ratatui::backend::Backend>(
     app: &mut App,
     receiver: &mut mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
+    let tick_rate = Duration::from_millis(100);
+    let mut last_tick = Instant::now();
     loop {
         terminal
             .draw(|f| ui(app, f))
             .map_err(|e| anyhow!("Failed to draw: {}", e))?;
         let rows = get_rows(app);
 
+        // Asynchronous operations.
         if let Ok(app_event) = receiver.try_recv() {
             app.handle_app_event(app_event);
         }
 
+        if last_tick.elapsed() >= tick_rate {
+            app.on_tick();
+            last_tick = Instant::now();
+        }
+
+        // Keyboard input.
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if app.handle_key(key, &rows)? {
