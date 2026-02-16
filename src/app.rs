@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use feed_rs::model::Content;
 use html2text::from_read;
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
@@ -95,15 +94,8 @@ impl From<feed_rs::model::Entry> for RssEntry {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-enum RunningState {
-    #[default]
-    Running,
-    Done,
-}
-
 pub enum AppEvent {
-    FeedFetched(Result<(feed_rs::model::Feed), String>, String),
+    FeedFetched(Result<feed_rs::model::Feed, String>, String),
     ScrapedEntry {
         rss_feed_index: usize,
         rss_entry_index: usize,
@@ -131,8 +123,6 @@ pub struct App {
     pub cursor: usize,
     // Feeds, which contain entries.
     pub rss_feeds: Vec<RssFeed>,
-    // Current running state.
-    pub running_state: RunningState,
     pub scrollbar_state: ScrollbarState,
     // The current visual line for the current article.
     pub rss_entry_scroll: u16,
@@ -154,7 +144,6 @@ impl App {
             input: String::new(),
             cursor: 0,
             rss_feeds: vec![],
-            running_state: RunningState::Running,
             scrollbar_state: ScrollbarState::new(0),
             rss_entry_scroll: 0,
             last_frame_area: Rect::default(),
@@ -334,6 +323,7 @@ impl App {
             }
             AppEvent::FeedFetched(Err(err), _) => {
                 self.error_message = Some(err);
+                self.popup = PopupState::Error;
             }
             AppEvent::SyncFinished(result) => {
                 self.popup = PopupState::None;
@@ -690,4 +680,177 @@ async fn sync_feeds(mut rss_feeds: Vec<RssFeed>) -> Result<Vec<RssFeed>> {
         rss_feed.rss_entries.sort_by_key(|e| Reverse(e.published));
     }
     Ok(rss_feeds)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::tui::PopupState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn test_open_rss_entry() {
+        let (sender, _) = mpsc::unbounded_channel();
+        let rows: Vec<Row> = vec![Row::RssFeed(0), Row::RssEntry(0, 0)];
+        let mut app = App::new(sender);
+        // Last frame area will affect the outcome of attempting to scroll.
+        // If this is left as its default, each 'j' key press will scroll
+        // downwards, when, in this test, the entry content is very small.
+        app.last_frame_area = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 30,
+        };
+        app.rss_feeds = vec![RssFeed {
+            id: "rss-feed-test-id".to_string(),
+            title: "rss feed test title".to_string(),
+            rss_entries: vec![RssEntry {
+                id: "rss-feed-test-id".to_string(),
+                title: "rss entry test title".to_string(),
+                authors: vec!["Test Person".to_string()],
+                published: Some(chrono::offset::Utc::now()),
+                content: "Test content.".to_string(),
+                content_total_lines: 1,
+                read: false,
+                link: "https://example.com".to_string(),
+            }],
+            expanded: false,
+            link: "https://example.com".to_string(),
+        }];
+
+        // Expand RSS feed.
+        assert!(app.view_state == ViewState::RssFeeds);
+        assert!(
+            !app.rss_feeds
+                .first()
+                .unwrap()
+                .rss_entries
+                .first()
+                .unwrap()
+                .read
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &rows)
+            .unwrap();
+        assert!(app.popup == PopupState::None);
+        assert!(app.rss_feeds.first().unwrap().expanded);
+        assert!(app.view_state == ViewState::RssFeeds);
+
+        // Scroll down one row to the RSS entry and open it.
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &rows)
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &rows)
+            .unwrap();
+        assert!(
+            app.view_state
+                == ViewState::RssEntry {
+                    rss_feed_index: 0,
+                    rss_entry_index: 0
+                }
+        );
+        assert!(
+            app.rss_feeds
+                .first()
+                .unwrap()
+                .rss_entries
+                .first()
+                .unwrap()
+                .read
+        );
+        assert!(app.rss_entry_scroll == 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &rows)
+            .unwrap();
+        assert!(app.rss_entry_scroll == 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &rows)
+            .unwrap();
+        assert!(app.view_state == ViewState::RssFeeds);
+        let quit_result = app
+            .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &rows)
+            .unwrap();
+        // A true result means the application should exit.
+        assert!(quit_result);
+    }
+
+    #[tokio::test]
+    async fn test_delete_rss_feed() {
+        let (sender, _) = mpsc::unbounded_channel();
+        let rows: Vec<Row> = vec![Row::RssFeed(0), Row::RssEntry(0, 0)];
+        let mut app = App::new(sender);
+        // Last frame area will affect the outcome of attempting to scroll.
+        // If this is left as its default, each 'j' key press will scroll
+        // downwards, when, in this test, the entry content is very small.
+        app.last_frame_area = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 30,
+        };
+        app.rss_feeds = vec![RssFeed {
+            id: "rss-feed-test-id".to_string(),
+            title: "rss feed test title".to_string(),
+            rss_entries: vec![RssEntry {
+                id: "rss-feed-test-id".to_string(),
+                title: "rss entry test title".to_string(),
+                authors: vec!["Test Person".to_string()],
+                published: Some(chrono::offset::Utc::now()),
+                content: "Test content.".to_string(),
+                content_total_lines: 1,
+                read: false,
+                link: "https://example.com".to_string(),
+            }],
+            expanded: false,
+            link: "https://example.com".to_string(),
+        }];
+
+        // Delete the RSS feed.
+        assert!(app.view_state == ViewState::RssFeeds);
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE), &rows)
+            .unwrap();
+        // Confirm deletion by pressing 'y'.
+        assert!(app.popup == PopupState::ConfirmDeleteRssFeed);
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), &rows)
+            .unwrap();
+
+        assert!(app.popup == PopupState::None);
+        assert!(app.rss_feeds.len() == 0);
+
+        let quit_result = app
+            .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE), &rows)
+            .unwrap();
+        // A true result means the application should exit.
+        assert!(quit_result);
+    }
+
+    #[tokio::test]
+    async fn test_add_rss_feed_failure() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let rows: Vec<Row> = Vec::new();
+        let mut app = App::new(sender);
+
+        // Enter 'a', causing the "Add feed" popup to open.
+        let add_key_event = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        app.handle_key(add_key_event, &rows).unwrap();
+        assert!(app.popup == PopupState::AddRssFeed);
+
+        // Enter mock RSS feed URL.
+        app.input = "https://example.com/rss.xml".to_string();
+        let enter_key_event = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        app.handle_key(enter_key_event, &rows).unwrap();
+        assert!(app.popup == PopupState::None);
+
+        let app_event = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("timed out waiting for AppEvent")
+            .expect("channel closed");
+        app.handle_app_event(app_event);
+        assert!(app.error_message.is_some());
+        assert!(
+            app.error_message.unwrap()
+                == "Failed to add feed: unable to parse feed: no root element"
+        );
+        assert!(app.popup == PopupState::Error);
+    }
 }

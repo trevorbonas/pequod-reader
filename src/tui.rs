@@ -1,7 +1,4 @@
 use chrono::Local;
-use crossterm::execute;
-use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
-use ratatui::Terminal;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Margin, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
@@ -14,10 +11,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Paragraph},
 };
-use std::io::{self, Stdout, stdout};
 use unicode_width::{self, UnicodeWidthChar, UnicodeWidthStr};
-
-use ratatui::{backend::CrosstermBackend, crossterm::terminal::EnterAlternateScreen};
 
 use crate::app::App;
 
@@ -40,6 +34,7 @@ pub enum ViewState {
     },
 }
 
+#[derive(PartialEq)]
 pub enum PopupState {
     None,
     // Popup for adding a new feed. Takes user input.
@@ -51,32 +46,6 @@ pub enum PopupState {
     RssEntryHelp,
     RssFeedHelp,
     Syncing,
-}
-
-/// A type alias for the terminal type used in this application
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
-
-/// Initialize the terminal
-pub fn init() -> io::Result<Tui> {
-    execute!(stdout(), EnterAlternateScreen)?;
-    enable_raw_mode()?;
-    set_panic_hook();
-    Terminal::new(CrosstermBackend::new(stdout()))
-}
-
-fn set_panic_hook() {
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = restore(); // ignore any errors as we are already failing
-        hook(panic_info);
-    }));
-}
-
-/// Restore the terminal to its original state
-pub fn restore() -> io::Result<()> {
-    execute!(stdout(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-    Ok(())
 }
 
 pub fn ui(app: &mut App, frame: &mut Frame) {
@@ -103,9 +72,10 @@ pub fn ui(app: &mut App, frame: &mut Frame) {
     if let PopupState::Syncing = app.popup {
         draw_syncing_popup(frame, app);
     }
-    if let Some(error_message) = app.error_message.clone() {
-        app.popup = PopupState::Error;
-        draw_error_popup(frame, &error_message);
+    if let PopupState::Error = app.popup {
+        if let Some(error_message) = app.error_message.clone() {
+            draw_error_popup(frame, &error_message);
+        }
     }
 }
 
@@ -251,7 +221,7 @@ fn truncate_str(str_to_truncate: &str, max_width: usize) -> String {
     let mut width = 0;
     for ch in str_to_truncate.chars() {
         let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width >= max_width - 3 {
+        if width + ch_width > max_width - 3 {
             break;
         }
         result.push(ch);
@@ -479,4 +449,47 @@ fn wrap_str(text: &str, width: usize) -> Vec<String> {
         .into_iter()
         .map(|l| l.to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wrap_str_two_words() {
+        let test_title = "two words";
+        let wrapped_str = wrap_str(test_title, 1);
+        assert!(wrapped_str.first().unwrap() == "two");
+        assert!(wrapped_str.get(1).unwrap() == "words");
+    }
+
+    #[test]
+    fn test_wrap_str_empty() {
+        let test_title = String::new();
+        let wrapped_str = wrap_str(&test_title, 3);
+        assert!(wrapped_str.first().unwrap() == "");
+        assert!(wrapped_str.get(1).is_none());
+    }
+
+    #[test]
+    fn test_wrap_str_long_single_world() {
+        let test_title = "this_is_a_long_word_that_should_not_get_wrapped";
+        let wrapped_str = wrap_str(test_title, 1);
+        assert!(wrapped_str.first().unwrap() == "this_is_a_long_word_that_should_not_get_wrapped");
+        assert!(wrapped_str.get(1).is_none());
+    }
+
+    #[test]
+    fn test_truncate_str_simple() {
+        let test_title = "test_title";
+        let truncated_title = truncate_str(&test_title, 7);
+        assert!(truncated_title == "test...");
+    }
+
+    #[test]
+    fn test_truncate_str_empty() {
+        let test_title = String::new();
+        let truncated_title = truncate_str(&test_title, 7);
+        assert!(truncated_title == "");
+    }
 }

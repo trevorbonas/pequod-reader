@@ -2,8 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event};
-use crossterm::execute;
-use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::enable_raw_mode;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
@@ -54,13 +53,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let mut app = App::new(sender);
     let _ = run_app(&mut terminal, &mut app, &mut receiver);
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        ratatui::crossterm::event::DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    ratatui::restore();
 
     Ok(())
 }
