@@ -1,3 +1,5 @@
+//! A single-page TUI RSS reader with a small footprint.
+
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -12,6 +14,7 @@ mod tui;
 use crate::app::{App, AppEvent};
 use crate::tui::{get_rows, ui};
 
+/// Runs the application.
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,

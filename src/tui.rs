@@ -1,3 +1,5 @@
+//! The terminal UI.
+
 use chrono::Local;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Margin, Position};
 use ratatui::style::{Color, Modifier, Style};
@@ -17,37 +19,49 @@ use crate::app::App;
 
 pub const SPINNER_CHARS: &[char] = &['/', '-', '\\', '|'];
 
+/// A row in the list view. A row can be either an RSS feed
+/// or an entry belonging to an RSS feed.
 pub enum Row {
     RssFeed(usize),         // Feed index.
     RssEntry(usize, usize), // Feed index and entry index.
 }
 
+/// View states the reader supports.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub enum ViewState {
     #[default]
-    // A list of feeds with nested entries.
+    /// A list of feeds with nested entries.
     RssFeeds,
-    // An entry title with a date and author(s).
+    /// An entry, displaying entry content.
     RssEntry {
         rss_feed_index: usize,
         rss_entry_index: usize,
     },
 }
 
+/// The popup state, representing a type of popup that can
+/// be displayed.
 #[derive(PartialEq)]
 pub enum PopupState {
     None,
-    // Popup for adding a new feed. Takes user input.
+    /// The popup for adding a new feed. Accepts user input.
     AddRssFeed,
+    /// The popup asking the user to confirm the deletion of
+    /// an RSS feed.
     ConfirmDeleteRssFeed,
-    // Popup that displays errors.
+    /// The popup that displays errors.
     Error,
-    // Help popup displaying keybinds and helpful information.
+    /// The popup that displays keybinds for navigating
+    /// an RSS entry.
     RssEntryHelp,
+    /// The popup that displays keybinds for navigating
+    /// the list of RSS feeds.
     RssFeedHelp,
+    /// The popup that indicates that syncing is happening.
     Syncing,
 }
 
+/// Draws the UI.
 pub fn ui(app: &mut App, frame: &mut Frame) {
     match app.view_state {
         ViewState::RssFeeds => draw_list(frame, app),
@@ -79,6 +93,7 @@ pub fn ui(app: &mut App, frame: &mut Frame) {
     }
 }
 
+/// Draws the list of RSS feeds and their entries.
 fn draw_list(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
     app.last_frame_area = area;
@@ -209,6 +224,7 @@ fn draw_list(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// Truncates a string to a specific width.
 fn truncate_str(str_to_truncate: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(str_to_truncate) <= max_width {
         return str_to_truncate.to_string();
@@ -231,6 +247,7 @@ fn truncate_str(str_to_truncate: &str, max_width: usize) -> String {
     result
 }
 
+/// Draws the contents of an RSS entry.
 fn draw_rss_entry(
     frame: &mut ratatui::Frame,
     app: &mut App,
@@ -273,6 +290,7 @@ fn draw_rss_entry(
     frame.render_widget(paragraph, size);
 }
 
+/// Retrieves all current rows.
 pub fn get_rows(app: &App) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
 
@@ -287,6 +305,8 @@ pub fn get_rows(app: &App) -> Vec<Row> {
     rows
 }
 
+/// Draws the RSS entry help popup, which displays keybinds used
+/// for navigating an RSS entry.
 fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
     let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
@@ -307,6 +327,8 @@ fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Draws the RSS feed popup, which shows keybinds used for
+/// navigating the list of RSS feeds.
 fn draw_rss_feed_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
     let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
@@ -327,6 +349,7 @@ fn draw_rss_feed_help_popup(frame: &mut ratatui::Frame) {
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Draws the popup for adding a new RSS feed.
 fn draw_add_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
     let instructions = Line::from(vec![
@@ -359,6 +382,8 @@ fn draw_add_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(input_paragraph, popup_area);
 }
 
+/// Draws the popup that confirms whether the users wants to delete an
+/// RSS feed.
 fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App) {
     let rows = get_rows(app);
     let row = &rows[app.cursor];
@@ -404,6 +429,7 @@ fn draw_confirm_delete_rss_feed_popup(frame: &mut ratatui::Frame, app: &mut App)
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Draws the popup that indicates that syncing is happening.
 fn draw_syncing_popup(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
     let spinner_char = SPINNER_CHARS[app.spinner_index];
@@ -422,6 +448,7 @@ fn draw_syncing_popup(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Draws the error popup, which an error message.
 fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
     let area = frame.area();
     let instructions = Line::from(vec![" Ok".into(), "<Enter> ".blue().bold().into()]);
@@ -443,6 +470,7 @@ fn draw_error_popup(frame: &mut ratatui::Frame, error_message: &str) {
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Wraps a string to a particular width.
 fn wrap_str(text: &str, width: usize) -> Vec<String> {
     let options = textwrap::Options::new(width).break_words(false);
     textwrap::wrap(text, options)
@@ -455,6 +483,7 @@ fn wrap_str(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Tests wrapping a string containing two words.
     #[test]
     fn test_wrap_str_two_words() {
         let test_title = "two words";
@@ -463,6 +492,7 @@ mod tests {
         assert!(wrapped_str.get(1).unwrap() == "words");
     }
 
+    /// Tests wrapping an empty string.
     #[test]
     fn test_wrap_str_empty() {
         let test_title = String::new();
@@ -471,6 +501,7 @@ mod tests {
         assert!(wrapped_str.get(1).is_none());
     }
 
+    /// Tests attempting to wrap a long, single-word string.
     #[test]
     fn test_wrap_str_long_single_world() {
         let test_title = "this_is_a_long_word_that_should_not_get_wrapped";
@@ -479,6 +510,7 @@ mod tests {
         assert!(wrapped_str.get(1).is_none());
     }
 
+    /// Tests truncating a title.
     #[test]
     fn test_truncate_str_simple() {
         let test_title = "test_title";
@@ -486,6 +518,7 @@ mod tests {
         assert!(truncated_title == "test...");
     }
 
+    /// Tests truncating an empty string.
     #[test]
     fn test_truncate_str_empty() {
         let test_title = String::new();

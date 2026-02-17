@@ -1,3 +1,5 @@
+//! Application data for the RSS reader.
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -5,11 +7,13 @@ use html2text::from_read;
 use ratatui::layout::Rect;
 use ratatui::widgets::ScrollbarState;
 use std::char;
-use std::cmp::{PartialEq, Reverse};
+use std::cmp::Reverse;
 use tokio::sync::mpsc;
 
 use crate::tui::{PopupState, Row, SPINNER_CHARS, ViewState};
 
+/// An RSS feed, a web feed that provides updates in the form of
+/// human-readable entries.
 #[derive(Clone)]
 pub struct RssFeed {
     pub id: String,
@@ -43,6 +47,9 @@ impl From<feed_rs::model::Feed> for RssFeed {
     }
 }
 
+/// An RSS entry, belonging to an RSS feed and containing
+/// human-readable data. An example of an RSS feed entry is
+/// a web article.
 #[derive(Clone)]
 pub struct RssEntry {
     pub id: String,
@@ -94,6 +101,7 @@ impl From<feed_rs::model::Entry> for RssEntry {
     }
 }
 
+/// An app event representing the result of an asynchronous operation.
 pub enum AppEvent {
     FeedFetched(Result<feed_rs::model::Feed, String>, String),
     ScrapedEntry {
@@ -104,31 +112,35 @@ pub enum AppEvent {
     SyncFinished(Result<Vec<RssFeed>, anyhow::Error>),
 }
 
+/// Application data. For example, RSS feeds, error messages, view
+/// state, etc.
 pub struct App {
-    // For asynchronous events, like synchronizing feeds
-    // or adding a new feed.
+    /// An unbounded sender used for asynchronous events,
+    /// like synchronizing feeds or adding a new feed.
     pub sender: mpsc::UnboundedSender<AppEvent>,
+    /// The current error message to display.
     pub error_message: Option<String>,
-    // Position of the cursor in the input field.
+    /// The position of the cursor in the input field.
     pub character_index: usize,
-    // The last key that was pressed.
+    /// The last key that was pressed.
     pub last_key: Option<KeyCode>,
-    // Which screen to display.
+    /// Which screen to display.
     pub view_state: ViewState,
-    // Which popup to display.
+    /// Which popup to display.
     pub popup: PopupState,
-    // User input. For example, when adding a new feed.
+    /// User input. For example, when adding a new feed.
     pub input: String,
-    // The position of the cursor in the feeds list.
+    /// The position of the cursor in the feeds list.
     pub cursor: usize,
-    // Feeds, which contain entries.
+    /// Feeds, which contain entries.
     pub rss_feeds: Vec<RssFeed>,
-    pub scrollbar_state: ScrollbarState,
-    // The current visual line for the current article.
+    /// The current visual line for the current article.
     pub rss_entry_scroll: u16,
-    // Previous frame area. Used for visual navigation.
+    /// Previous frame area. Used for visual navigation.
     pub last_frame_area: Rect,
+    /// Whether the app is currently syncing.
     pub syncing: bool,
+    /// The index used to draw the current frame of the spinner.
     pub spinner_index: usize,
 }
 
@@ -152,6 +164,8 @@ impl App {
         }
     }
 
+    /// Calculates the maximum RSS entry scroll position possible when
+    /// content is wrapped.
     pub fn get_max_rss_entry_scroll(
         &self,
         rss_feed_index: usize,
@@ -167,6 +181,7 @@ impl App {
         }
     }
 
+    /// Adds a new RSS feed.
     pub fn add_rss_feed(&mut self) {
         let rss_feed_url: String = self.input.clone();
         self.input.clear();
@@ -192,6 +207,7 @@ impl App {
         });
     }
 
+    /// Deletes an RSS feed.
     pub fn delete_rss_feed(&mut self, rss_feed_index: usize) {
         self.rss_feeds.remove(rss_feed_index);
     }
@@ -199,16 +215,19 @@ impl App {
     // Cursor methods are from the ratatui user input sample:
     // https://ratatui.rs/examples/apps/user_input/.
 
+    /// Moves the user's input cursor left.
     pub fn move_cursor_left(&mut self) {
         let cursor_moved_left = self.character_index.saturating_sub(1);
         self.character_index = self.clamp_cursor(cursor_moved_left);
     }
 
+    /// Moves the user's input cursor right.
     pub fn move_cursor_right(&mut self) {
         let cursor_moved_right = self.character_index.saturating_add(1);
         self.character_index = self.clamp_cursor(cursor_moved_right);
     }
 
+    /// Adds a new char to the application input.
     pub fn enter_char(&mut self, new_char: char) {
         let index = self.byte_index();
         self.input.insert(index, new_char);
@@ -226,6 +245,8 @@ impl App {
             .nth(self.character_index)
             .unwrap_or(self.input.len())
     }
+
+    /// Deletes a char from the application input.
     pub fn delete_char(&mut self) {
         let is_not_cursor_leftmost = self.character_index != 0;
         if is_not_cursor_leftmost {
@@ -248,14 +269,18 @@ impl App {
         }
     }
 
+    /// Restricts the input cursor's movement, preventing the cursor from
+    /// moving beyond already entered text.
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
         new_cursor_pos.clamp(0, self.input.chars().count())
     }
 
+    /// Resets the cursor position.
     fn reset_cursor(&mut self) {
         self.character_index = 0;
     }
 
+    /// Updates all RSS feeds, adding new entries.
     fn sync(&mut self) {
         let sender = self.sender.clone();
         let rss_feeds = self.rss_feeds.clone();
@@ -265,12 +290,14 @@ impl App {
         });
     }
 
+    /// Updates spinner appearance.
     pub fn on_tick(&mut self) {
         if self.syncing {
             self.spinner_index = (self.spinner_index + 1) % SPINNER_CHARS.len();
         }
     }
 
+    /// Uses an entry's URL to scrape web contents.
     fn fetch_full_rss_entry_content(&mut self, rss_feed_index: usize, rss_entry_index: usize) {
         let sender = self.sender.clone();
         let link = self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index]
@@ -300,6 +327,7 @@ impl App {
         });
     }
 
+    /// Handles app events, the results of asynchronous operations.
     pub fn handle_app_event(&mut self, app_event: AppEvent) {
         match app_event {
             AppEvent::ScrapedEntry {
@@ -340,6 +368,8 @@ impl App {
         }
     }
 
+    /// Handles user key input. The behaviour of key inputs change depending
+    /// on the context, such as view state of the reader.
     pub fn handle_key(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
         match self.popup {
             PopupState::AddRssFeed => self.handle_add_rss_feed_popup(key),
@@ -352,6 +382,7 @@ impl App {
         }
     }
 
+    /// Handles input when the add RSS feed popup is displayed.
     fn handle_add_rss_feed_popup(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -374,6 +405,7 @@ impl App {
         Ok(false)
     }
 
+    /// Handles input when the delete RSS feed popup is displayed.
     fn handle_delete_rss_feed_popup(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => self.popup = PopupState::None,
@@ -404,6 +436,7 @@ impl App {
         Ok(false)
     }
 
+    /// Handles input when the error popup is displayed.
     fn handle_error_popup(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
@@ -415,6 +448,7 @@ impl App {
         Ok(false)
     }
 
+    /// Handles input when the RSS feed help popup is displayed.
     fn handle_rss_feed_help_popup(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.popup = PopupState::None,
@@ -423,6 +457,7 @@ impl App {
         Ok(false)
     }
 
+    /// Handles input when the RSS entry help popup is displayed.
     fn handle_rss_entry_help_popup(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.popup = PopupState::None,
@@ -431,6 +466,7 @@ impl App {
         Ok(false)
     }
 
+    /// Handles input for either the RSS feeds view or RSS entry view.
     fn handle_default(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
         match self.view_state {
             ViewState::RssFeeds => self.handle_rss_feeds_view(key, rows),
@@ -441,6 +477,8 @@ impl App {
         }
     }
 
+    /// Handles input for the RSS feeds view. The RSS feeds view shows all RSS feeds
+    /// and possibly their entries, if a feed is expanded.
     fn handle_rss_feeds_view(&mut self, key: KeyEvent, rows: &[Row]) -> Result<bool> {
         match key.code {
             KeyCode::Char('s') => {
@@ -568,6 +606,8 @@ impl App {
         Ok(false)
     }
 
+    /// Handle input for RSS entry view. This view displays the content
+    /// of an entry.
     fn handle_rss_entry_view(
         &mut self,
         key: KeyEvent,
@@ -660,7 +700,7 @@ impl App {
     }
 }
 
-/// Update a Vec<RssFeeds>, adding newer RSS entries.
+/// Updates a `Vec<RssFeeds>`, adding newer RSS entries.
 async fn sync_feeds(mut rss_feeds: Vec<RssFeed>) -> Result<Vec<RssFeed>> {
     let client = reqwest::Client::new();
     for rss_feed in rss_feeds.iter_mut() {
@@ -691,6 +731,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::time::timeout;
 
+    /// Tests navigating the RSS feeds view, opening an RSS entry,
+    /// and quitting.
     #[tokio::test]
     async fn test_open_rss_entry() {
         let (sender, _) = mpsc::unbounded_channel();
@@ -774,6 +816,7 @@ mod tests {
         assert!(quit_result);
     }
 
+    /// Tests deleting an existing RSS feed.
     #[tokio::test]
     async fn test_delete_rss_feed() {
         let (sender, _) = mpsc::unbounded_channel();
@@ -824,6 +867,7 @@ mod tests {
         assert!(quit_result);
     }
 
+    /// Tests attempting to add a non-existent RSS feed.
     #[tokio::test]
     async fn test_add_rss_feed_failure() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
