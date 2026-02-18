@@ -156,7 +156,7 @@ impl App {
         max_ttl: Option<Duration>,
     ) -> anyhow::Result<Self> {
         let db_path = match db_path {
-            Some(path) => path,
+            Some(path) => path.join("rss.db"),
             None => get_default_db_path()?,
         };
 
