@@ -1,14 +1,18 @@
 //! A single-page TUI RSS reader with a small footprint.
 
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use clap::Parser;
 use crossterm::event::{self, Event};
 use crossterm::terminal::enable_raw_mode;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 mod app;
+mod local_storage;
 mod tui;
 
 use crate::app::{App, AppEvent};
@@ -49,12 +53,32 @@ fn run_app<B: ratatui::backend::Backend>(
     }
 }
 
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    #[arg(short, long)]
+    db_path: Option<String>,
+
+    #[arg(short, long)]
+    max_ttl_days: Option<usize>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli: Cli = Cli::parse();
+    let db_path = match cli.db_path {
+        Some(db_path) => PathBuf::from_str(db_path.as_str()).ok(),
+        None => None,
+    };
+    let max_ttl_days = match cli.max_ttl_days {
+        Some(max_ttl_days) => Some(chrono::Duration::days(max_ttl_days as i64)),
+        None => None,
+    };
+
     let (sender, mut receiver) = mpsc::unbounded_channel();
     enable_raw_mode()?;
     let mut terminal = ratatui::init();
-    let mut app = App::new(sender);
+    let mut app = App::new(sender, db_path, max_ttl_days)?;
     let _ = run_app(&mut terminal, &mut app, &mut receiver);
     ratatui::restore();
 
