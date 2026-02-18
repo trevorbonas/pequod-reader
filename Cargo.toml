@@ -2,7 +2,7 @@
 name = "pequod-reader"
 version = "0.1.0"
 description = "A single-page TUI RSS reader"
-authors = ["Trevor Bonas <trevorbonas@users.noreply.github.com>"]
+authors = ["Trevor Bonas <trevorbonas@gmail.com>"]
 license = "MIT"
 edition = "2024"
 
