@@ -155,7 +155,6 @@ fn draw_list(frame: &mut ratatui::Frame, app: &mut App) {
                 let wrapped_title = textwrap::wrap(&rss_entry.title, (wrapped_width) as usize);
                 let date = rss_entry
                     .published
-                    .unwrap_or_default()
                     .with_timezone(&Local)
                     .format("%Y-%m-%d %I:%M%P")
                     .to_string();

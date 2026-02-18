@@ -1,15 +1,17 @@
 //! Application data for the RSS reader.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use directories::ProjectDirs;
 use html2text::from_read;
 use ratatui::layout::Rect;
-use ratatui::widgets::ScrollbarState;
 use std::char;
 use std::cmp::Reverse;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+use crate::local_storage::LocalStorage;
 use crate::tui::{PopupState, Row, SPINNER_CHARS, ViewState};
 
 /// An RSS feed, a web feed that provides updates in the form of
@@ -58,7 +60,7 @@ pub struct RssEntry {
     pub content: String,
     pub content_total_lines: usize,
     pub link: String,
-    pub published: Option<DateTime<Utc>>,
+    pub published: DateTime<Utc>,
     pub read: bool,
 }
 
@@ -81,6 +83,8 @@ impl From<feed_rs::model::Entry> for RssEntry {
             })
             .unwrap_or_default();
 
+        let published = entry.published.unwrap_or(Utc::now());
+
         RssEntry {
             id: entry.id,
             title: entry
@@ -95,7 +99,7 @@ impl From<feed_rs::model::Entry> for RssEntry {
                 .first()
                 .map(|l| l.href.clone())
                 .unwrap_or_default(),
-            published: entry.published,
+            published,
             read: false,
         }
     }
@@ -142,11 +146,30 @@ pub struct App {
     pub syncing: bool,
     /// The index used to draw the current frame of the spinner.
     pub spinner_index: usize,
+    pub storage: LocalStorage,
 }
 
 impl App {
-    pub fn new(sender: mpsc::UnboundedSender<AppEvent>) -> App {
-        App {
+    pub fn new(
+        sender: mpsc::UnboundedSender<AppEvent>,
+        db_path: Option<PathBuf>,
+        max_ttl: Option<Duration>,
+    ) -> anyhow::Result<Self> {
+        let db_path = match db_path {
+            Some(path) => path.join("rss.db"),
+            None => get_default_db_path()?,
+        };
+
+        let max_ttl = match max_ttl {
+            Some(max_ttl) => max_ttl,
+            None => Duration::days(5),
+        };
+
+        let storage = LocalStorage::new(db_path, max_ttl)?;
+        let _ = storage.expire_old_entries();
+        let rss_feeds = storage.load_rss_feeds().unwrap();
+
+        Ok(App {
             sender: sender,
             error_message: None,
             character_index: 0,
@@ -155,13 +178,13 @@ impl App {
             popup: PopupState::None,
             input: String::new(),
             cursor: 0,
-            rss_feeds: vec![],
-            scrollbar_state: ScrollbarState::new(0),
+            rss_feeds: rss_feeds,
             rss_entry_scroll: 0,
             last_frame_area: Rect::default(),
             syncing: false,
             spinner_index: 0,
-        }
+            storage,
+        })
     }
 
     /// Calculates the maximum RSS entry scroll position possible when
@@ -209,6 +232,16 @@ impl App {
 
     /// Deletes an RSS feed.
     pub fn delete_rss_feed(&mut self, rss_feed_index: usize) {
+        match self
+            .storage
+            .delete_rss_feed(&self.rss_feeds[rss_feed_index].id)
+        {
+            Ok(_) => {}
+            Err(err) => {
+                self.error_message = Some(err.to_string());
+                self.popup = PopupState::Error;
+            }
+        }
         self.rss_feeds.remove(rss_feed_index);
     }
 
@@ -337,17 +370,43 @@ impl App {
             } => match result {
                 Ok(content) => {
                     self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].content = content;
+                    match self.storage.save_rss_entry(
+                        &self.rss_feeds[rss_feed_index].id,
+                        &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index],
+                    ) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            self.error_message = Some(err.to_string());
+                            self.popup = PopupState::Error;
+                        }
+                    }
                     self.error_message = None;
                 }
                 Err(err) => {
                     self.error_message = Some(err);
+                    self.popup = PopupState::Error;
                 }
             },
             AppEvent::FeedFetched(Ok(feed), feed_url) => {
                 let mut new_rss_feed = RssFeed::from(feed);
                 new_rss_feed.link = feed_url;
-                self.rss_feeds.push(new_rss_feed);
-                self.error_message = None;
+                match self.storage.save_rss_feed(&new_rss_feed) {
+                    Ok(_) => {}
+                    Err(err) => {
+                        self.error_message = Some(err.to_string());
+                        self.popup = PopupState::Error;
+                    }
+                }
+                if let Some(_) = self.rss_feeds.iter().find(|f| f.id == new_rss_feed.id) {
+                    self.error_message = Some(format!(
+                        "failed to add {}: feed already exists",
+                        new_rss_feed.title
+                    ));
+                    self.popup = PopupState::Error;
+                } else {
+                    self.rss_feeds.push(new_rss_feed);
+                    self.rss_feeds.sort_by_key(|e| e.title.to_string());
+                }
             }
             AppEvent::FeedFetched(Err(err), _) => {
                 self.error_message = Some(err);
@@ -359,9 +418,17 @@ impl App {
                 match result {
                     Ok(rss_feeds) => {
                         self.rss_feeds = rss_feeds;
+                        match self.storage.save_rss_feeds(&self.rss_feeds) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                self.error_message = Some(err.to_string());
+                                self.popup = PopupState::Error;
+                            }
+                        }
                     }
                     Err(e) => {
                         self.error_message = Some(format!("Sync failed: {}", e));
+                        self.popup = PopupState::Error;
                     }
                 }
             }
@@ -543,10 +610,24 @@ impl App {
                 match rows[self.cursor] {
                     Row::RssFeed(rss_feed_index) => {
                         self.rss_feeds[rss_feed_index].expanded = false;
+                        match self.storage.save_rss_feed(&self.rss_feeds[rss_feed_index]) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                self.error_message = Some(err.to_string());
+                                self.popup = PopupState::Error;
+                            }
+                        }
                     }
                     Row::RssEntry(rss_feed_index, rss_entry_index) => {
                         self.rss_feeds[rss_feed_index].expanded = false;
                         self.cursor = self.cursor - rss_entry_index - 1;
+                        match self.storage.save_rss_feed(&self.rss_feeds[rss_feed_index]) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                self.error_message = Some(err.to_string());
+                                self.popup = PopupState::Error;
+                            }
+                        }
                     }
                 }
             }
@@ -557,10 +638,27 @@ impl App {
                         Row::RssFeed(rss_feed_index) => {
                             self.rss_feeds[rss_feed_index].expanded =
                                 !self.rss_feeds[rss_feed_index].expanded;
+                            match self.storage.save_rss_feed(&self.rss_feeds[rss_feed_index]) {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    self.error_message = Some(err.to_string());
+                                    self.popup = PopupState::Error;
+                                }
+                            }
                         }
                         Row::RssEntry(rss_feed_index, rss_entry_index) => {
                             self.rss_entry_scroll = 0;
                             self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index].read = true;
+                            match self.storage.save_rss_entry(
+                                &self.rss_feeds[rss_feed_index].id,
+                                &self.rss_feeds[rss_feed_index].rss_entries[rss_entry_index],
+                            ) {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    self.error_message = Some(err.to_string());
+                                    self.popup = PopupState::Error;
+                                }
+                            }
                             self.view_state = ViewState::RssEntry {
                                 rss_feed_index,
                                 rss_entry_index,
@@ -704,15 +802,15 @@ impl App {
 async fn sync_feeds(mut rss_feeds: Vec<RssFeed>) -> Result<Vec<RssFeed>> {
     let client = reqwest::Client::new();
     for rss_feed in rss_feeds.iter_mut() {
-        let newest_date = rss_feed
+        let newest_date: DateTime<Utc> = rss_feed
             .rss_entries
             .first()
-            .and_then(|e| e.published)
-            .unwrap_or_default();
+            .map(|e| e.published)
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let response_text = client.get(&rss_feed.link).send().await?.text().await?;
         let updated_feed = feed_rs::parser::parse(response_text.as_bytes())?;
         for entry in updated_feed.entries {
-            if entry.published.unwrap_or_default() > newest_date {
+            if entry.published.unwrap_or(DateTime::<Utc>::MIN_UTC) > newest_date {
                 let rss_entry = RssEntry::from(entry);
                 rss_feed.rss_entries.push(rss_entry)
             }
@@ -722,22 +820,33 @@ async fn sync_feeds(mut rss_feeds: Vec<RssFeed>) -> Result<Vec<RssFeed>> {
     Ok(rss_feeds)
 }
 
+fn get_default_db_path() -> Result<PathBuf, anyhow::Error> {
+    let dirs = ProjectDirs::from("com", "trevorbonas", "pequod-reader")
+        .expect("could not determine project directories");
+    let data_dir = dirs.data_dir();
+    std::fs::create_dir_all(data_dir)?;
+    Ok(data_dir.join("rss.db"))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{str::FromStr, time::Duration};
 
     use super::*;
     use crate::tui::PopupState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tempfile::tempdir;
     use tokio::time::timeout;
 
     /// Tests navigating the RSS feeds view, opening an RSS entry,
     /// and quitting.
     #[tokio::test]
     async fn test_open_rss_entry() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = PathBuf::from_str(temp_dir.path().to_str().unwrap()).unwrap();
         let (sender, _) = mpsc::unbounded_channel();
         let rows: Vec<Row> = vec![Row::RssFeed(0), Row::RssEntry(0, 0)];
-        let mut app = App::new(sender);
+        let mut app = App::new(sender, Some(db_path), None).unwrap();
         // Last frame area will affect the outcome of attempting to scroll.
         // If this is left as its default, each 'j' key press will scroll
         // downwards, when, in this test, the entry content is very small.
@@ -754,7 +863,7 @@ mod tests {
                 id: "rss-feed-test-id".to_string(),
                 title: "rss entry test title".to_string(),
                 authors: vec!["Test Person".to_string()],
-                published: Some(chrono::offset::Utc::now()),
+                published: chrono::offset::Utc::now(),
                 content: "Test content.".to_string(),
                 content_total_lines: 1,
                 read: false,
@@ -819,9 +928,11 @@ mod tests {
     /// Tests deleting an existing RSS feed.
     #[tokio::test]
     async fn test_delete_rss_feed() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = PathBuf::from_str(temp_dir.path().to_str().unwrap()).unwrap();
         let (sender, _) = mpsc::unbounded_channel();
         let rows: Vec<Row> = vec![Row::RssFeed(0), Row::RssEntry(0, 0)];
-        let mut app = App::new(sender);
+        let mut app = App::new(sender, Some(db_path), None).unwrap();
         // Last frame area will affect the outcome of attempting to scroll.
         // If this is left as its default, each 'j' key press will scroll
         // downwards, when, in this test, the entry content is very small.
@@ -838,7 +949,7 @@ mod tests {
                 id: "rss-feed-test-id".to_string(),
                 title: "rss entry test title".to_string(),
                 authors: vec!["Test Person".to_string()],
-                published: Some(chrono::offset::Utc::now()),
+                published: chrono::offset::Utc::now(),
                 content: "Test content.".to_string(),
                 content_total_lines: 1,
                 read: false,
@@ -870,9 +981,11 @@ mod tests {
     /// Tests attempting to add a non-existent RSS feed.
     #[tokio::test]
     async fn test_add_rss_feed_failure() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = PathBuf::from_str(temp_dir.path().to_str().unwrap()).unwrap();
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let rows: Vec<Row> = Vec::new();
-        let mut app = App::new(sender);
+        let mut app = App::new(sender, Some(db_path), None).unwrap();
 
         // Enter 'a', causing the "Add feed" popup to open.
         let add_key_event = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
