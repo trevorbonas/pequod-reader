@@ -61,6 +61,7 @@ Pequod Reader supports basic Vim-like navigation keybindings. The full set of su
 | `a`          | Feeds         | Add new RSS feed            |
 | `d`          | Feeds         | Delete RSS feed             |
 | `s`          | Feeds         | Sync all RSS feeds          |
+| `c`          | Feeds         | Collapse a feed             |
 | `q`          | Feeds         | Quit Pequod Reader          |
 | `h`          | Feeds         | Show feeds help popup       |
 | `f`          | Entry         | Fetch full entry HTML       |
