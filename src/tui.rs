@@ -187,14 +187,10 @@ fn draw_list(frame: &mut ratatui::Frame, app: &mut App) {
         "<j> ".blue().bold().into(),
         "↑".into(),
         "<k> ".blue().bold().into(),
-        "Select".into(),
-        "<Enter> ".blue().bold().into(),
         "Add".into(),
         "<a> ".blue().bold().into(),
-        "Delete".into(),
-        "<d> ".blue().bold().into(),
-        "Sync".into(),
-        "<s> ".blue().bold().into(),
+        "Help".into(),
+        "<h> ".blue().bold().into(),
         "Quit".into(),
         "<q> ".blue().bold().into(),
     ]);
@@ -261,10 +257,6 @@ fn draw_rss_entry(
         "<j> ".blue().bold().into(),
         "↑".into(),
         "<k> ".blue().bold().into(),
-        "Fetch".into(),
-        "<f> ".blue().bold().into(),
-        "Open".into(),
-        "<o> ".blue().bold().into(),
         "Help".into(),
         "<h> ".blue().bold().into(),
         "Back".into(),
@@ -308,15 +300,49 @@ pub fn get_rows(app: &App) -> Vec<Row> {
 /// for navigating an RSS entry.
 fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            "↓".into(),
+            "<j> ".blue().bold(),
+            "↑".into(),
+            "<k> ".blue().bold().into(),
+            "Help".into(),
+            "<h> ".blue().bold().into(),
+            "Back".into(),
+            "<q>".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Fetch".into(),
+            "<f> ".blue().bold().into(),
+            "Open".into(),
+            "<o> ".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Bottom".into(),
+            "<G> ".blue().bold().into(),
+            "Top".into(),
+            "<gg> ".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Half page up".into(),
+            "<ctrl + u>".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Half page down".into(),
+            "<ctrl + d>".blue().bold().into(),
+        ]),
+    ];
+
     let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
-    let paragraph = Paragraph::new(String::default())
+    let paragraph = Paragraph::new(lines)
+        .centered()
         .style(Style::default())
         .block(
             Block::bordered()
                 .title("Entry commands")
                 .title_bottom(instructions.centered()),
         );
-    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let vertical = Layout::vertical([Constraint::Length(7)]).flex(Flex::Center);
     let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
     let popup_area = area;
     let [popup_area] = vertical.areas(popup_area);
@@ -330,15 +356,55 @@ fn draw_rss_entry_help_popup(frame: &mut ratatui::Frame) {
 /// navigating the list of RSS feeds.
 fn draw_rss_feed_help_popup(frame: &mut ratatui::Frame) {
     let area = frame.area();
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            "↓".into(),
+            "<j> ".blue().bold(),
+            "↑".into(),
+            "<k> ".blue().bold().into(),
+            "Add".into(),
+            "<a> ".blue().bold().into(),
+            "Help".into(),
+            "<h> ".blue().bold().into(),
+            "Quit".into(),
+            "<q> ".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Select".into(),
+            "<Enter> ".blue().bold().into(),
+            "Delete".into(),
+            "<d> ".blue().bold().into(),
+            "Sync".into(),
+            "<s> ".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Bottom".into(),
+            "<G> ".blue().bold().into(),
+            "Top".into(),
+            "<gg> ".blue().bold().into(),
+            "Collapse".into(),
+            "<c>".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Half page up".into(),
+            "<ctrl + u> ".blue().bold().into(),
+        ]),
+        Line::from(vec![
+            "Half page down".into(),
+            "<ctrl + d>".blue().bold().into(),
+        ]),
+    ];
+
     let instructions = Line::from(vec![" Back".into(), "<q> ".blue().bold().into()]);
-    let paragraph = Paragraph::new(String::default())
+    let paragraph = Paragraph::new(lines)
+        .centered()
         .style(Style::default())
         .block(
             Block::bordered()
                 .title("Feed commands")
                 .title_bottom(instructions.centered()),
         );
-    let vertical = Layout::vertical([Constraint::Length(3)]).flex(Flex::Center);
+    let vertical = Layout::vertical([Constraint::Length(7)]).flex(Flex::Center);
     let horizontal = Layout::horizontal([Constraint::Percentage(85)]).flex(Flex::Center);
     let popup_area = area;
     let [popup_area] = vertical.areas(popup_area);
