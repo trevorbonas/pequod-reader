@@ -1,7 +1,6 @@
 //! The terminal UI.
 
 use chrono::Local;
-use ratatui::buffer::Cell;
 use ratatui::layout::{Constraint, Direction, Flex, Layout, Margin, Position};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
