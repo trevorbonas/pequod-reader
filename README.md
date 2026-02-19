@@ -2,7 +2,7 @@
 
 Pequod Reader is a TUI RSS reader designed to fit within the smallest terminal pane possible.
 
-<video src="https://github.com/user-attachments/assets/8fb57375-a378-4128-823e-e3386e0cc871" height="100"></video>
+<video src="https://github.com/user-attachments/assets/8fb57375-a378-4128-823e-e3386e0cc871" height="300" width="200"></video>
 
 ## Table of Contents
 
