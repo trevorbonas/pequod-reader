@@ -76,7 +76,6 @@ Pequod Reader supports basic Vim-like navigation keybindings. The full set of su
 Pequod Reader saves all RSS feeds and entries to a local SQLite database:
 - On Linux, this is located in `~/.local/share/pequod-reader/rss.db`.
 - On macOS, this is located in `~/Library/Application\ Support/com.trevorbonas.pequod-reader/rss.db`
-- On Windows, this is located in `%AppData%\Roaming\trevorbonas\pequod-reader\data\rss.db`.
 
 ### Full Entry Reading
 
