@@ -39,9 +39,9 @@ To uninstall Pequod Reader:
 
 When using a terminal with multiple panes and multiple applications running, terminal real estate is limited. Pequod Reader is designed to run in a small pane alongside many other programs. For example:
 
-<img src="./img/crowded_terminal.png" width=50px />
+<img src="./img/crowded_terminal.png" height=400px />
 
-Other programs depicted have no relation to this project.
+Pequod Reader is in the bottom right pane. Other programs depicted have no relation to this project.
 
 ## Features
 
