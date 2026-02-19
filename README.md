@@ -6,12 +6,13 @@ Pequod Reader is a TUI RSS reader designed to fit within the smallest terminal p
 
 ## Table of Contents
 
-- [Installation](#installation).
-- [Why?](#why).
-- [Features](#features).
-- [FAQ](#faq).
+- [Install](#install)
+- [Uninstall](#uninstall)
+- [Why?](#why)
+- [Features](#features)
+- [FAQ](#faq)
 
-## Installation
+## Install
 
 On the [Releases page](https://trevorbonas/pequod-reader/releases), download the binary matching your system and add the binary to your `PATH`. For example, on macOS, assuming `/usr/local/bin` is already a part of your `PATH`:
 
@@ -21,19 +22,20 @@ tar -xzf pequod-reader-darwin-x86-64.tar.gz
 sudo cp pequod-reader-darwin-x86-64/bin/pequod-reader /usr/local/bin
 ```
 
-## Uninstallation
+## Uninstall
 
 To uninstall Pequod Reader:
-1. Remove the `pequod-reader` binary:
+1. Remove the `pequod-reader` binary. For example, on Linux:
    
    ```shell
    sudo rm /usr/local/bin/pequod-reader
    ```
-2. Remove the program's `rss.db` SQLite database:
+2. Remove the program's `rss.db` SQLite database. For example, on Linux:
 
    ```shell
    rm ~/.local/share/pequod-reader/rss.db
    ```
+   See the [Local Storage](#local-storage) section below for where your RSS feed data is stored.
 
 ## Why?
 
