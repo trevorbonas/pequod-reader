@@ -17,9 +17,9 @@ Pequod Reader is a TUI RSS reader designed to fit within the smallest terminal p
 On the [Releases page](https://github.com/trevorbonas/pequod-reader/releases), download the binary matching your system and add the binary to your `PATH`. For example, on macOS, assuming `/usr/local/bin` is already a part of your `PATH`:
 
 ```shell
-wget https://github.com/trevorbonas/pequod-reader/releases/download/v0.1.0/pequod-reader-darwin-x86-64.tar.gz
-tar -xzf pequod-reader-darwin-x86-64.tar.gz
-sudo cp pequod-reader-darwin-x86-64/bin/pequod-reader /usr/local/bin
+wget https://github.com/trevorbonas/pequod-reader/releases/download/v0.1.0/pequod-reader-v0.1.0-macos-x86_64.tar.gz
+tar -xzf pequod-reader-v0.1.0-macos-x86_64.tar.gz
+sudo cp target/x86_64-apple-darwin/release/pequod-reader /usr/local/bin
 ```
 
 ## Uninstall
