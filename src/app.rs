@@ -412,26 +412,25 @@ impl App {
                 self.error_message = Some(err);
                 self.popup = PopupState::Error;
             }
-            AppEvent::SyncFinished(result) => {
-                self.popup = PopupState::None;
-                self.syncing = false;
-                match result {
-                    Ok(rss_feeds) => {
-                        self.rss_feeds = rss_feeds;
-                        match self.storage.save_rss_feeds(&self.rss_feeds) {
-                            Ok(_) => {}
-                            Err(err) => {
-                                self.error_message = Some(err.to_string());
-                                self.popup = PopupState::Error;
-                            }
+            AppEvent::SyncFinished(result) => match result {
+                Ok(rss_feeds) => {
+                    self.rss_feeds = rss_feeds;
+                    match self.storage.save_rss_feeds(&self.rss_feeds) {
+                        Ok(_) => {
+                            self.popup = PopupState::None;
+                            self.syncing = false;
+                        }
+                        Err(err) => {
+                            self.error_message = Some(err.to_string());
+                            self.popup = PopupState::Error;
                         }
                     }
-                    Err(e) => {
-                        self.error_message = Some(format!("Sync failed: {}", e));
-                        self.popup = PopupState::Error;
-                    }
                 }
-            }
+                Err(e) => {
+                    self.error_message = Some(format!("Sync failed: {}", e));
+                    self.popup = PopupState::Error;
+                }
+            },
         }
     }
 

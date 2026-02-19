@@ -122,7 +122,7 @@ impl LocalStorage {
     }
 
     /// Saves multiple RSS feeds and all of their entries.
-    pub fn save_rss_feeds(&mut self, rss_feeds: &[RssFeed]) -> rusqlite::Result<()> {
+    pub fn save_rss_feeds(&mut self, rss_feeds: &Vec<RssFeed>) -> rusqlite::Result<()> {
         for rss_feed in rss_feeds {
             self.save_rss_feed(rss_feed)?;
         }
